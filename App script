@@ -10,23 +10,37 @@ function onOpen() {
 
 /**
  * Main Entry Point: Google Sheets Trigger
- * Structure updated to context-based logic while preserving original functionality
+ * Logic merged: Broad Context/Timestamping with your specific Encounter logic.
  */
 function onEdit(e) {
   const context = getEventContext(e);
   if (!context) return;
 
-  // 1. Handle Automatic Timestamping (All Sheets + Pharmacy) - NEW LOGIC
+  // 1. BROAD TIMESTAMP LOGIC (Replaces handleSimpleTimestamp)
   handleTimestamping(context);
 
-  // 2. Handle Data Swapping & ID Generation (Encounter Sheet Only) - PRESERVED LOGIC
+  // 2. ENCOUNTER SPECIFIC LOGIC (Preserved exactly from your code)
   if (context.activeRangeName === "ENCOUNTER_RANGE") {
-    handleEncounterLogic(context);
+    const rowNum = context.range.getRow();
+
+    // HANDLE PATIENT_ID SWAP
+    if (context.columnName === "PATIENT_ID") {
+      handlePatientIdSwap(e, context.headers, rowNum, context.startCol);
+    }
+
+    // ENCOUNTER_ID GENERATION (Your 5-attempt logic)
+    pollAndGenerateEncounterId(context.sheet, context.activeRangeObject, rowNum, context.startCol, context.headers);
+
+    // PHARMACY SYNC TRIGGER
+    const pharmacyTriggers = ["PATIENT_ID", "ENCOUNTER_ID", "MEDICATION", "STRENGTH_MG_ML", "ROUTE", "DOSAGE", "FREQUENCY", "PHYSICIAN"];
+    if (pharmacyTriggers.includes(context.columnName)) {
+      syncToPharmacy(context.sheet, rowNum, context.startCol, context.headers);
+    }
   }
 }
 
 /**
- * Context Parser - NEW LOGIC
+ * Context Parser: Maps the edit to your specific Named Ranges
  */
 function getEventContext(e) {
   const range = e.range;
@@ -35,9 +49,9 @@ function getEventContext(e) {
   const sheet = range.getSheet();
   const source = e.source;
   
+  // List of all ranges where you want logic to apply
   const timestampRanges = ["LOG_PROVIDER_RANGE", "VISIT_RANGE", "ENCOUNTER_RANGE", "PHARMACY_RANGE"];
-  const clinicalRanges = ["ENCOUNTER_RANGE"];
-  const allNames = [...new Set([...timestampRanges, ...clinicalRanges])];
+  const allNames = [...new Set([...timestampRanges, "ENCOUNTER_RANGE"])];
 
   let activeRangeName = "";
   let activeRangeObject = null;
@@ -70,7 +84,7 @@ function getEventContext(e) {
 }
 
 /**
- * New Timestamping Logic
+ * Modern Timestamp Logic (Broad Range)
  */
 function handleTimestamping(ctx) {
   if (!ctx.isTimestampZone) return;
@@ -82,27 +96,6 @@ function handleTimestamping(ctx) {
     ctx.e.value === ""
       ? targetCell.clearContent()
       : targetCell.setValue(new Date()).setNumberFormat("HH:mm:ss");
-  }
-}
-
-/**
- * Combined Logic for Encounter Table - PRESERVED FROM FIRST CODE
- */
-function handleEncounterLogic(ctx) {
-  const rowNum = ctx.range.getRow();
-
-  // 1. Handle Patient ID Swap
-  if (ctx.columnName === "PATIENT_ID") {
-    handlePatientIdSwap(ctx.e, ctx.headers, rowNum, ctx.startCol);
-  }
-
-  // 2. ENCOUNTER_ID GENERATION (Original 5-attempt polling)
-  pollAndGenerateEncounterId(ctx.sheet, ctx.activeRangeObject, rowNum, ctx.startCol, ctx.headers);
-
-  // 3. PHARMACY SYNC TRIGGER
-  const pharmacyTriggers = ["PATIENT_ID", "ENCOUNTER_ID", "MEDICATION", "STRENGTH_MG_ML", "ROUTE", "DOSAGE", "FREQUENCY", "PHYSICIAN"];
-  if (pharmacyTriggers.includes(ctx.columnName)) {
-    syncToPharmacy(ctx.sheet, rowNum, ctx.startCol, ctx.headers);
   }
 }
 
@@ -188,7 +181,7 @@ function handlePatientIdSwap(e, headers, rowNum, startCol) {
 }
 
 /**
- * PHARMACY SYNC: PRESERVED
+ * PHARMACY SYNC: PRESERVED FULL LOGIC
  */
 function syncToPharmacy(encounterSheet, rowNum, startCol, encounterHeaders) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -228,9 +221,6 @@ function syncToPharmacy(encounterSheet, rowNum, startCol, encounterHeaders) {
   });
 }
 
-/**
- * FULL REFRESH TOOL: PRESERVED
- */
 function INITIAL_SYNC_ALL_DATA() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const encRange = ss.getRangeByName("ENCOUNTER_RANGE");
@@ -245,7 +235,7 @@ function INITIAL_SYNC_ALL_DATA() {
   SpreadsheetApp.getUi().alert('Sync Complete.');
 }
 
-// --- REMAINING HELPERS: PRESERVED ---
+// --- HELPERS (PRESERVED) ---
 
 function getRecentVisit(data, headers, pId) {
   const pIdx = headers.indexOf("PATIENT_ID");
