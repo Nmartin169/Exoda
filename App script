@@ -4,7 +4,7 @@
 function onOpen() {
   const ui = SpreadsheetApp.getUi();
   ui.createMenu('🏥 EHR System')
-      .addItem('Refresh Pharmacy (Clear & Sync)', 'INITIAL_SYNC_ALL_DATA')
+      .addItem('Refresh Pharmacy (Maintain Status)', 'INITIAL_SYNC_ALL_DATA')
       .addToUi();
 }
 
@@ -19,93 +19,107 @@ function onEdit(e) {
 
   if (!val || range.getNumRows() > 1) return;
 
+  // Check if edit is in ENCOUNTER_RANGE
   const encounterRange = source.getRangeByName("ENCOUNTER_RANGE");
-  if (!encounterRange || !isCellInNamedRange(range, encounterRange)) {
-    handleSimpleTimestamp(e);
+  if (encounterRange && isCellInNamedRange(range, encounterRange)) {
+    handleEncounterEdit(e, encounterRange);
     return;
   }
 
+  // Check if edit is in PHARMACY_RANGE
+  const pharmacyRange = source.getRangeByName("PHARMACY_RANGE");
+  if (pharmacyRange && isCellInNamedRange(range, pharmacyRange)) {
+    handlePharmacyEdit(e, pharmacyRange);
+    return;
+  }
+
+  // Fallback for simple timestamps outside named ranges
+  handleSimpleTimestamp(e);
+}
+
+/**
+ * Logic for edits made on the ENCOUNTER table
+ */
+function handleEncounterEdit(e, encounterRange) {
+  const sheet = e.range.getSheet();
   const startRow = encounterRange.getRow();
   const startCol = encounterRange.getColumn();
   const headers = sheet.getRange(startRow, startCol, 1, encounterRange.getWidth()).getValues()[0]
                        .map(h => h.toString().trim().toUpperCase());
   
-  const colIndex = range.getColumn() - startCol;
+  const colIndex = e.range.getColumn() - startCol;
   const columnName = headers[colIndex] || "";
-  const rowNum = range.getRow();
+  const rowNum = e.range.getRow();
 
-  // 1. HANDLE PATIENT_ID SWAP
-  if (columnName === "PATIENT_ID") {
-    handlePatientIdSwap(e, headers, rowNum, startCol);
-  }
-
-  // 2. HANDLE TIMESTAMPING
+  if (columnName === "PATIENT_ID") handlePatientIdSwap(e, headers, rowNum, startCol);
+  
   if (columnName === "DATE_OF_VISIT") {
     const timeColIdx = headers.indexOf("TIME_OF_VISIT");
-    if (timeColIdx !== -1) {
-      sheet.getRange(rowNum, startCol + timeColIdx).setValue(new Date());
-    }
+    if (timeColIdx !== -1) sheet.getRange(rowNum, startCol + timeColIdx).setValue(new Date());
   }
 
-  // 3. ENCOUNTER_ID GENERATION
   pollAndGenerateEncounterId(sheet, encounterRange, rowNum, startCol, headers);
 
-  // 4. PROGRESSIVE SYNC TO PHARMACY TABLE
-  const pharmacyTriggers = [
-    "PATIENT_ID", "ENCOUNTER_ID", "MEDICATION", "STRENGTH_MG_ML", 
-    "ROUTE", "DOSAGE", "FREQUENCY", "PHYSICIAN"
-  ];
-
+  const pharmacyTriggers = ["PATIENT_ID", "ENCOUNTER_ID", "MEDICATION", "STRENGTH_MG_ML", "ROUTE", "DOSAGE", "FREQUENCY", "PHYSICIAN"];
   if (pharmacyTriggers.includes(columnName)) {
     syncToPharmacy(sheet, rowNum, startCol, headers);
   }
 }
 
 /**
- * FULL SYNC: Wipes Pharmacy and appends all Encounter data in order.
+ * Logic for edits made on the PHARMACY table (Pharmacist workflow)
+ */
+function handlePharmacyEdit(e, pharmacyRange) {
+  const sheet = e.range.getSheet();
+  const startRow = pharmacyRange.getRow();
+  const startCol = pharmacyRange.getColumn();
+  const headers = sheet.getRange(startRow, startCol, 1, pharmacyRange.getWidth()).getValues()[0]
+                       .map(h => h.toString().trim().toUpperCase());
+  
+  const colIndex = e.range.getColumn() - startCol;
+  const columnName = headers[colIndex] || "";
+  const rowNum = e.range.getRow();
+
+  // Trigger timestamp when Status or Pharmacist Name is updated
+  if (columnName === "STATUS" || columnName === "PHARMACIST_NAME") {
+    const dateIdx = headers.indexOf("DISPENSED_DATE");
+    if (dateIdx !== -1) {
+      const dateCell = sheet.getRange(rowNum, startCol + dateIdx);
+      if (!dateCell.getValue()) { // Only timestamp if empty
+        dateCell.setValue(new Date());
+        // Auto-fill time to the cell immediately to the right
+        sheet.getRange(rowNum, startCol + dateIdx + 1).setValue(new Date());
+      }
+    }
+  }
+}
+
+/**
+ * FULL SYNC: Updates doctor data while preserving Pharmacist entries
  */
 function INITIAL_SYNC_ALL_DATA() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const encounterRange = ss.getRangeByName("ENCOUNTER_RANGE");
   const pharmacyRange = ss.getRangeByName("PHARMACY_RANGE");
   
-  if (!encounterRange || !pharmacyRange) {
-    SpreadsheetApp.getUi().alert("Error: Ensure both ENCOUNTER_RANGE and PHARMACY_RANGE are defined.");
-    return;
-  }
+  if (!encounterRange || !pharmacyRange) return;
 
-  const encounterSheet = encounterRange.getSheet();
   const encounterData = encounterRange.getValues();
   const encounterHeaders = encounterData[0].map(h => h.toString().trim().toUpperCase());
   
-  const pSheet = pharmacyRange.getSheet();
-  const pStartRow = pharmacyRange.getRow();
-  const pStartCol = pharmacyRange.getColumn();
-  const pWidth = pharmacyRange.getWidth();
-
-  // 1. Clear existing data in Pharmacy range (everything below the header)
-  if (pharmacyRange.getHeight() > 1) {
-    pSheet.getRange(pStartRow + 1, pStartCol, pharmacyRange.getHeight() - 1, pWidth).clearContent();
-  }
-
-  // 2. Loop through Encounter data and append valid rows to rebuild chronological order
   let syncCount = 0;
   for (let i = 1; i < encounterData.length; i++) {
     const encId = encounterData[i][encounterHeaders.indexOf("ENCOUNTER_ID")];
-    const medication = encounterData[i][encounterHeaders.indexOf("MEDICATION")];
-    
-    if (encId && medication) {
-      const rowNum = encounterRange.getRow() + i;
-      const startCol = encounterRange.getColumn();
-      syncToPharmacy(encounterSheet, rowNum, startCol, encounterHeaders);
+    if (encId) {
+      syncToPharmacy(encounterRange.getSheet(), encounterRange.getRow() + i, encounterRange.getColumn(), encounterHeaders);
       syncCount++;
     }
   }
-  SpreadsheetApp.getUi().alert('Success: Pharmacy cleared and ' + syncCount + ' orders appended in order.');
+  SpreadsheetApp.getUi().alert('Sync Complete: ' + syncCount + ' records updated. Pharmacist data preserved.');
 }
 
 /**
- * Standard Sync: Finds existing row by ID to update, or appends to bottom if new.
+ * Sync Logic: Maps data but specifically IGNORES columns the pharmacist manages
  */
 function syncToPharmacy(encounterSheet, rowNum, startCol, encounterHeaders) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -120,17 +134,12 @@ function syncToPharmacy(encounterSheet, rowNum, startCol, encounterHeaders) {
   const pharmacyHeaders = pharmacySheet.getRange(pStartRow, pStartCol, 1, pWidth).getValues()[0]
                                        .map(h => h.toString().trim().toUpperCase());
   
-  const colsToMirror = [
-    "PATIENT_ID", "DATE_OF_VISIT", "TIME_OF_VISIT", "ENCOUNTER_ID", 
-    "MEDICATION", "STRENGTH_MG_ML", "ROUTE", "DOSAGE", "FREQUENCY", "PHYSICIAN"
-  ];
+  const doctorColumns = ["PATIENT_ID", "DATE_OF_VISIT", "TIME_OF_VISIT", "ENCOUNTER_ID", "MEDICATION", "STRENGTH_MG_ML", "ROUTE", "DOSAGE", "FREQUENCY", "PHYSICIAN"];
 
   const encIdIdxEncounter = encounterHeaders.indexOf("ENCOUNTER_ID");
   const encounterId = encounterSheet.getRange(rowNum, startCol + encIdIdxEncounter).getValue();
-
   if (!encounterId) return;
 
-  // Search for existing ID in Pharmacy to see if we update or append
   const pEncIdIdx = pharmacyHeaders.indexOf("ENCOUNTER_ID");
   const pharmacyData = pharmacyRange.getValues();
   let targetRow = -1;
@@ -144,10 +153,16 @@ function syncToPharmacy(encounterSheet, rowNum, startCol, encounterHeaders) {
     }
   }
 
-  // If ID not found, find the next available empty row at the bottom of the table
   const writeRow = (targetRow !== -1) ? targetRow : getFirstEmptyRowInRange(pharmacyRange);
 
-  colsToMirror.forEach(colName => {
+  // Set default Status for NEW entries only
+  const statusIdx = pharmacyHeaders.indexOf("STATUS");
+  if (targetRow === -1 && statusIdx !== -1) {
+    pharmacySheet.getRange(writeRow, pStartCol + statusIdx).setValue("Pending");
+  }
+
+  // Update ONLY doctor-controlled columns
+  doctorColumns.forEach(colName => {
     const srcIdx = encounterHeaders.indexOf(colName);
     const destIdx = pharmacyHeaders.indexOf(colName);
 
@@ -159,20 +174,18 @@ function syncToPharmacy(encounterSheet, rowNum, startCol, encounterHeaders) {
 }
 
 /**
- * Helper: Finds the first empty row specifically within the PHARMACY_RANGE
+ * Helper: Find first empty row in the PHARMACY_RANGE
  */
 function getFirstEmptyRowInRange(range) {
   const values = range.getValues();
   for (let i = 0; i < values.length; i++) {
-    if (values[i].join("").trim() === "") {
-      return range.getRow() + i;
-    }
+    if (values[i].join("").trim() === "") return range.getRow() + i;
   }
   return range.getLastRow() + 1;
 }
 
 /**
- * Polling Logic for Encounter ID
+ * Helper: Encounter ID Generation
  */
 function pollAndGenerateEncounterId(sheet, encounterRange, rowNum, startCol, headers) {
   const pIdColIdx = headers.indexOf("PATIENT_ID");
@@ -204,7 +217,6 @@ function pollAndGenerateEncounterId(sheet, encounterRange, rowNum, startCol, hea
         const sequence = count.toString().padStart(2, '0');
         const finalId = `${dateStr}-${patientId}-${sequence}`;
         sheet.getRange(rowNum, startCol + encIdColIdx).setValue(finalId);
-        
         syncToPharmacy(sheet, rowNum, startCol, headers);
         break; 
       }
@@ -264,19 +276,19 @@ function handleSimpleTimestamp(e) {
   }
 }
 
-function getRecentVisit(data, headers, pId) {
-  const pIdx = headers.indexOf("PATIENT_ID");
-  const vIdx = headers.indexOf("VISIT_ID");
-  const matches = data.filter(r => r[pIdx].toString() == pId.toString() && r[vIdx]).map(r => r[vIdx].toString()).sort().reverse();
-  return matches.length > 0 ? matches[0] : "";
-}
-
 function calculateAge(dob) {
   const today = new Date();
   let age = today.getFullYear() - dob.getFullYear();
   const m = today.getMonth() - dob.getMonth();
   if (m < 0 || (m === 0 && today.getDate() < dob.getDate())) age--;
   return age;
+}
+
+function getRecentVisit(data, headers, pId) {
+  const pIdx = headers.indexOf("PATIENT_ID");
+  const vIdx = headers.indexOf("VISIT_ID");
+  const matches = data.filter(r => r[pIdx].toString() == pId.toString() && r[vIdx]).map(r => r[vIdx].toString()).sort().reverse();
+  return matches.length > 0 ? matches[0] : "";
 }
 
 function isCellInNamedRange(cell, nr) {
