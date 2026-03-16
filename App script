@@ -10,24 +10,23 @@ function onOpen() {
 
 /**
  * Main Entry Point: Google Sheets Trigger
+ * Structure updated to context-based logic while preserving original functionality
  */
 function onEdit(e) {
   const context = getEventContext(e);
   if (!context) return;
 
-  // 1. Handle Automatic Timestamping (All Sheets + Pharmacy)
-  // This replaces the old handleSimpleTimestamp(e)
+  // 1. Handle Automatic Timestamping (All Sheets + Pharmacy) - NEW LOGIC
   handleTimestamping(context);
 
-  // 2. Handle Clinical Logic (Encounter Sheet Only)
+  // 2. Handle Data Swapping & ID Generation (Encounter Sheet Only) - PRESERVED LOGIC
   if (context.activeRangeName === "ENCOUNTER_RANGE") {
     handleEncounterLogic(context);
   }
 }
 
 /**
- * Context Parser - Recognizes all Named Ranges
- * This centralizes the logic for identifying WHERE the edit happened.
+ * Context Parser - NEW LOGIC
  */
 function getEventContext(e) {
   const range = e.range;
@@ -36,7 +35,6 @@ function getEventContext(e) {
   const sheet = range.getSheet();
   const source = e.source;
   
-  // List of ranges that support timestamping
   const timestampRanges = ["LOG_PROVIDER_RANGE", "VISIT_RANGE", "ENCOUNTER_RANGE", "PHARMACY_RANGE"];
   const clinicalRanges = ["ENCOUNTER_RANGE"];
   const allNames = [...new Set([...timestampRanges, ...clinicalRanges])];
@@ -72,7 +70,7 @@ function getEventContext(e) {
 }
 
 /**
- * New Timestamp Logic: Clears if cell is emptied, sets time if filled.
+ * New Timestamping Logic
  */
 function handleTimestamping(ctx) {
   if (!ctx.isTimestampZone) return;
@@ -81,17 +79,14 @@ function handleTimestamping(ctx) {
   
   if (triggers.includes(ctx.columnName)) {
     const targetCell = ctx.range.offset(0, 1);
-    // If the date is deleted, remove the time. Otherwise, set current time.
-    if (ctx.e.value === "") {
-      targetCell.clearContent();
-    } else {
-      targetCell.setValue(new Date()).setNumberFormat("HH:mm:ss");
-    }
+    ctx.e.value === ""
+      ? targetCell.clearContent()
+      : targetCell.setValue(new Date()).setNumberFormat("HH:mm:ss");
   }
 }
 
 /**
- * Combined Logic for Encounter Table
+ * Combined Logic for Encounter Table - PRESERVED FROM FIRST CODE
  */
 function handleEncounterLogic(ctx) {
   const rowNum = ctx.range.getRow();
@@ -101,16 +96,10 @@ function handleEncounterLogic(ctx) {
     handlePatientIdSwap(ctx.e, ctx.headers, rowNum, ctx.startCol);
   }
 
-  // 2. Handle DATE_OF_VISIT specific logic (Ensures ID generation is triggered)
-  if (ctx.columnName === "DATE_OF_VISIT") {
-     // The handleTimestamping function already handled the Time offset.
-     // We just let the flow continue to ID generation.
-  }
-
-  // 3. Generate Encounter ID (Preserved 5-attempt logic)
+  // 2. ENCOUNTER_ID GENERATION (Original 5-attempt polling)
   pollAndGenerateEncounterId(ctx.sheet, ctx.activeRangeObject, rowNum, ctx.startCol, ctx.headers);
 
-  // 4. Sync to Pharmacy
+  // 3. PHARMACY SYNC TRIGGER
   const pharmacyTriggers = ["PATIENT_ID", "ENCOUNTER_ID", "MEDICATION", "STRENGTH_MG_ML", "ROUTE", "DOSAGE", "FREQUENCY", "PHYSICIAN"];
   if (pharmacyTriggers.includes(ctx.columnName)) {
     syncToPharmacy(ctx.sheet, rowNum, ctx.startCol, ctx.headers);
@@ -118,7 +107,7 @@ function handleEncounterLogic(ctx) {
 }
 
 /**
- * ENCOUNTER_ID GENERATION: PRESERVED FULL LOGIC
+ * ENCOUNTER_ID GENERATION: PRESERVED FULL LOGIC (5-attempt loop)
  */
 function pollAndGenerateEncounterId(sheet, encounterRange, rowNum, startCol, headers) {
   const pIdColIdx = headers.indexOf("PATIENT_ID");
@@ -240,7 +229,7 @@ function syncToPharmacy(encounterSheet, rowNum, startCol, encounterHeaders) {
 }
 
 /**
- * INITIAL SYNC ALL DATA: PRESERVED
+ * FULL REFRESH TOOL: PRESERVED
  */
 function INITIAL_SYNC_ALL_DATA() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -256,7 +245,7 @@ function INITIAL_SYNC_ALL_DATA() {
   SpreadsheetApp.getUi().alert('Sync Complete.');
 }
 
-// --- HELPERS (PRESERVED) ---
+// --- REMAINING HELPERS: PRESERVED ---
 
 function getRecentVisit(data, headers, pId) {
   const pIdx = headers.indexOf("PATIENT_ID");
