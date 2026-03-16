@@ -10,13 +10,12 @@ function onOpen() {
 
 /**
  * Main Entry Point: Google Sheets Trigger
- * Uses Context logic for broad range support, preserves original Encounter/Sync logic.
  */
 function onEdit(e) {
   const context = getEventContext(e);
   if (!context) return;
 
-  // 1. Handle Automatic Timestamping (Broad logic for all timestamp-enabled ranges)
+  // 1. Handle Automatic Timestamping
   handleTimestamping(context);
 
   // 2. Handle Encounter-Specific Logic
@@ -26,7 +25,7 @@ function onEdit(e) {
 }
 
 /**
- * Context Parser: Broadens the scope to all relevant named ranges.
+ * Context Parser
  */
 function getEventContext(e) {
   const range = e.range;
@@ -35,7 +34,6 @@ function getEventContext(e) {
   const sheet = range.getSheet();
   const source = e.source;
   
-  // Broad list of ranges that support the timestamp/logic flow
   const timestampRanges = ["LOG_PROVIDER_RANGE", "VISIT_RANGE", "ENCOUNTER_RANGE", "PHARMACY_RANGE"];
   const clinicalRanges = ["ENCOUNTER_RANGE"];
   const allNames = [...new Set([...timestampRanges, ...clinicalRanges])];
@@ -71,37 +69,37 @@ function getEventContext(e) {
 }
 
 /**
- * Robust Timestamping: Clears when emptied, sets time when filled.
+ * Corrected Timestamping: Value only to avoid "Typed Column" format errors.
  */
 function handleTimestamping(ctx) {
   if (!ctx.isTimestampZone) return;
 
-  // Broader trigger list as requested
   const triggers = ["DATE_OF_VISIT", "DATE_OF_DEPARTURE", "DISPENSED_DATE"];
   
   if (triggers.includes(ctx.columnName)) {
     const targetCell = ctx.range.offset(0, 1);
-    ctx.e.value === ""
-      ? targetCell.clearContent()
-      : targetCell.setValue(new Date()).setNumberFormat("HH:mm:ss");
+    if (ctx.e.value === "") {
+      targetCell.clearContent();
+    } else {
+      // Removed .setNumberFormat() to prevent the "Typed Column" error.
+      // Ensure the destination column in your sheet is formatted as Time (Format > Number > Time).
+      targetCell.setValue(new Date());
+    }
   }
 }
 
 /**
- * Encounter Table Logic: PRESERVED FROM ATTACHED SCRIPT
+ * Encounter Table Logic: PRESERVED FULL LOGIC
  */
 function handleEncounterLogic(ctx) {
   const rowNum = ctx.range.getRow();
 
-  // 1. HANDLE PATIENT_ID SWAP
   if (ctx.columnName === "PATIENT_ID") {
     handlePatientIdSwap(ctx.e, ctx.headers, rowNum, ctx.startCol);
   }
 
-  // 2. ENCOUNTER_ID GENERATION (Includes Polling & Syncing)
   pollAndGenerateEncounterId(ctx.sheet, ctx.activeRangeObject, rowNum, ctx.startCol, ctx.headers);
 
-  // 3. PROGRESSIVE SYNC TO PHARMACY TABLE
   const pharmacyTriggers = [
     "PATIENT_ID", "ENCOUNTER_ID", "MEDICATION", "STRENGTH_MG_ML", 
     "ROUTE", "DOSAGE", "FREQUENCY", "PHYSICIAN"
@@ -113,7 +111,7 @@ function handleEncounterLogic(ctx) {
 }
 
 /**
- * FULL SYNC: PRESERVED FULL LOGIC (Clear & Sync)
+ * FULL SYNC: PRESERVED FULL LOGIC
  */
 function INITIAL_SYNC_ALL_DATA() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
