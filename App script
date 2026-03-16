@@ -34,10 +34,12 @@ function onEdit(e) {
   const columnName = headers[colIndex] || "";
   const rowNum = range.getRow();
 
+  // 1. HANDLE PATIENT_ID SWAP
   if (columnName === "PATIENT_ID") {
     handlePatientIdSwap(e, headers, rowNum, startCol);
   }
 
+  // 2. HANDLE TIMESTAMPING
   if (columnName === "DATE_OF_VISIT") {
     const timeColIdx = headers.indexOf("TIME_OF_VISIT");
     if (timeColIdx !== -1) {
@@ -45,8 +47,10 @@ function onEdit(e) {
     }
   }
 
+  // 3. ENCOUNTER_ID GENERATION
   pollAndGenerateEncounterId(sheet, encounterRange, rowNum, startCol, headers);
 
+  // 4. PROGRESSIVE SYNC TO PHARMACY TABLE
   const pharmacyTriggers = [
     "PATIENT_ID", "ENCOUNTER_ID", "MEDICATION", "STRENGTH_MG_ML", 
     "ROUTE", "DOSAGE", "FREQUENCY", "PHYSICIAN"
@@ -101,7 +105,6 @@ function syncToPharmacy(encounterSheet, rowNum, startCol, encounterHeaders) {
   if (targetRowOffset !== -1) {
     writeRow = pStartRow + targetRowOffset;
   } else {
-    // Find the first truly empty row in the sheet to avoid overwriting unrelated data
     writeRow = pharmacySheet.getLastRow() + 1; 
   }
 
@@ -117,7 +120,7 @@ function syncToPharmacy(encounterSheet, rowNum, startCol, encounterHeaders) {
 }
 
 /**
- * Historical Sync Tool
+ * Historical Sync Tool (Accessible via Custom Menu)
  */
 function INITIAL_SYNC_ALL_DATA() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
