@@ -40,8 +40,7 @@ function onEdit(e) {
   // 3. ENCOUNTER_ID GENERATION
   pollAndGenerateEncounterId(sheet, encounterRange, rowNum, startCol, headers);
 
-  // 4. PROGRESSIVE SYNC TO PHARMACY 
-  // List all columns that should trigger an update in the Pharmacy sheet
+  // 4. PROGRESSIVE SYNC TO PHARMACY TABLE
   const pharmacyTriggers = [
     "PATIENT_ID", "ENCOUNTER_ID", "MEDICATION", "STRENGTH_MG_ML", 
     "ROUTE", "DOSAGE", "FREQUENCY", "PHYSICIAN"
@@ -53,16 +52,25 @@ function onEdit(e) {
 }
 
 /**
- * Logic to Sync Specific Columns to the PHARMACY table dynamically
+ * Logic to Sync to PHARMACY table using Named Ranges and Column Names
  */
 function syncToPharmacy(encounterSheet, rowNum, startCol, encounterHeaders) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const pharmacySheet = ss.getSheetByName("Pharmacy");
-  if (!pharmacySheet) return;
+  const pharmacyRange = ss.getRangeByName("PHARMACY_RANGE");
+  
+  if (!pharmacyRange) {
+    console.error("PHARMACY_RANGE not found. Please define it in Data > Named ranges.");
+    return;
+  }
 
-  // Get Pharmacy Headers to map columns dynamically
-  const pharmacyDataAll = pharmacySheet.getDataRange().getValues();
-  const pharmacyHeaders = pharmacyDataAll[0].map(h => h.toString().trim().toUpperCase());
+  const pharmacySheet = pharmacyRange.getSheet();
+  const pStartRow = pharmacyRange.getRow();
+  const pStartCol = pharmacyRange.getColumn();
+  const pWidth = pharmacyRange.getWidth();
+
+  // Get Pharmacy Headers from the first row of the Named Range
+  const pharmacyHeaders = pharmacySheet.getRange(pStartRow, pStartCol, 1, pWidth).getValues()[0]
+                                       .map(h => h.toString().trim().toUpperCase());
   
   const colsToMirror = [
     "PATIENT_ID", "DATE_OF_VISIT", "TIME_OF_VISIT", "ENCOUNTER_ID", 
@@ -72,34 +80,39 @@ function syncToPharmacy(encounterSheet, rowNum, startCol, encounterHeaders) {
   const encIdIdxEncounter = encounterHeaders.indexOf("ENCOUNTER_ID");
   const encounterId = encounterSheet.getRange(rowNum, startCol + encIdIdxEncounter).getValue();
 
-  // We require an Encounter ID to sync, otherwise we risk creating duplicate messy rows
-  if (!encounterId || encounterId === "") return;
+  if (!encounterId) return;
 
+  // Search for the Encounter ID within the PHARMACY_RANGE only
   const pEncIdIdx = pharmacyHeaders.indexOf("ENCOUNTER_ID");
-  let targetRow = -1;
+  const pharmacyData = pharmacyRange.getValues();
+  let targetRowOffset = -1;
   
   if (pEncIdIdx !== -1) {
-    for (let i = 1; i < pharmacyDataAll.length; i++) {
-      if (pharmacyDataAll[i][pEncIdIdx] === encounterId) {
-        targetRow = i + 1;
+    for (let i = 1; i < pharmacyData.length; i++) {
+      if (pharmacyData[i][pEncIdIdx] === encounterId) {
+        targetRowOffset = i; 
         break;
       }
     }
   }
 
-  // Determine row to write to
-  const writeRow = (targetRow !== -1) ? targetRow : pharmacySheet.getLastRow() + 1;
+  // Determine actual sheet row
+  let writeRow;
+  if (targetRowOffset !== -1) {
+    writeRow = pStartRow + targetRowOffset;
+  } else {
+    // Find first empty row within the PHARMACY_RANGE or append to end
+    writeRow = pharmacySheet.getLastRow() + 1; 
+  }
 
-  // Mirror values for all defined columns
+  // Map each column by name
   colsToMirror.forEach(colName => {
     const srcIdx = encounterHeaders.indexOf(colName);
     const destIdx = pharmacyHeaders.indexOf(colName);
 
     if (srcIdx !== -1 && destIdx !== -1) {
       const value = encounterSheet.getRange(rowNum, startCol + srcIdx).getValue();
-      // Only update if there is a value to prevent overwriting with blanks 
-      // unless you want the Pharmacy tab to clear if Encounter is cleared
-      pharmacySheet.getRange(writeRow, destIdx + 1).setValue(value);
+      pharmacySheet.getRange(writeRow, pStartCol + destIdx).setValue(value);
     }
   });
 }
@@ -138,7 +151,6 @@ function pollAndGenerateEncounterId(sheet, encounterRange, rowNum, startCol, hea
         const finalId = `${dateStr}-${patientId}-${sequence}`;
         sheet.getRange(rowNum, startCol + encIdColIdx).setValue(finalId);
         
-        // Trigger sync immediately once the ID is born
         syncToPharmacy(sheet, rowNum, startCol, headers);
         break; 
       }
