@@ -15,20 +15,22 @@ function onEdit(e) {
   const context = getEventContext(e);
   if (!context) return;
 
-  // 1. Handle Automatic Timestamping (Log_Provider, Visit, Encounter, Pharmacy)
+  // 1. Handle Automatic Timestamping (All Sheets + Pharmacy)
   handleTimestamping(context);
 
-  // 2. Handle Data Swapping (Patient Name -> Patient ID + Age + Visit ID)
-  handleDataSwaps(context);
+  // 2. Handle Data Swapping (Encounter Sheet: Name to ID + Age + Visit ID)
+  if (context.activeRangeName === "ENCOUNTER_RANGE" && context.columnName === "PATIENT_ID") {
+    handlePatientIdSwap(context);
+  }
 
-  // 3. Clinical Logic (Encounter ID Generation & Pharmacy Sync)
+  // 3. Clinical Logic (Encounter ID generation and Pharmacy Sync)
   if (context.activeRangeName === "ENCOUNTER_RANGE") {
     handleClinicalLogic(context);
   }
 }
 
 /**
- * Extracts and validates metadata from the edit event
+ * Context Parser - Determines which range is being edited
  */
 function getEventContext(e) {
   const range = e.range;
@@ -66,13 +68,13 @@ function getEventContext(e) {
   return {
     e, range, sheet, source,
     activeRangeName, activeRangeObject,
-    columnName, headers, startCol, startRow,
+    columnName, headers, startCol,
     isTimeZone: timestampRanges.includes(activeRangeName)
   };
 }
 
 /**
- * Logic for updating timestamps (Offsets 1 to the right)
+ * Logic for updating timestamps (Offsets 1 cell to the right)
  */
 function handleTimestamping(ctx) {
   if (!ctx.isTimeZone) return;
@@ -88,11 +90,23 @@ function handleTimestamping(ctx) {
 }
 
 /**
- * Handles Patient ID Lookup, Age Calculation, and Recent Visit ID fetch
+ * Core Clinical Logic for Encounter Table
  */
-function handleDataSwaps(ctx) {
-  if (ctx.activeRangeName !== "ENCOUNTER_RANGE" || ctx.columnName !== "PATIENT_ID") return;
+function handleClinicalLogic(ctx) {
+  // 1. Generate Encounter ID using your sequence counting logic
+  pollAndGenerateEncounterId(ctx.sheet, ctx.activeRangeObject, ctx.range.getRow(), ctx.startCol, ctx.headers);
 
+  // 2. Sync to Pharmacy if Doctor-controlled columns are edited
+  const pharmacyTriggers = ["PATIENT_ID", "ENCOUNTER_ID", "MEDICATION", "STRENGTH_MG_ML", "ROUTE", "DOSAGE", "FREQUENCY", "PHYSICIAN"];
+  if (pharmacyTriggers.includes(ctx.columnName)) {
+    syncToPharmacy(ctx.sheet, ctx.range.getRow(), ctx.startCol, ctx.headers);
+  }
+}
+
+/**
+ * Your Logic for Swapping Names to IDs + Age + Visit ID Lookup
+ */
+function handlePatientIdSwap(ctx) {
   const visitRange = ctx.source.getRangeByName("VISIT_RANGE");
   if (!visitRange) return;
 
@@ -103,22 +117,19 @@ function handleDataSwaps(ctx) {
   const dobIdx = vHeaders.indexOf("DATE_OF_BIRTH");
 
   const match = vData.find(r => r[nameIdx].toString().trim() == ctx.e.value.toString().trim());
-  
   if (match) {
     const pId = match[idIdx];
     const rule = ctx.range.getDataValidation();
-    
-    // Perform the Patient Name to Patient ID swap
     ctx.range.setDataValidation(null);
     ctx.range.setValue(pId);
     
-    // Auto-fill Age
+    // Calculate Age
     const ageColIdx = ctx.headers.indexOf("AGE");
     if (ageColIdx !== -1 && match[dobIdx] instanceof Date) {
       ctx.sheet.getRange(ctx.range.getRow(), ctx.startCol + ageColIdx).setValue(calculateAge(match[dobIdx]));
     }
 
-    // Auto-fill most recent Visit ID
+    // Set Recent Visit ID
     const vIdColIdx = ctx.headers.indexOf("VISIT_ID");
     if (vIdColIdx !== -1) {
       ctx.sheet.getRange(ctx.range.getRow(), ctx.startCol + vIdColIdx).setValue(getRecentVisit(vData, vHeaders, pId));
@@ -130,23 +141,7 @@ function handleDataSwaps(ctx) {
 }
 
 /**
- * Handles Encounter ID sequence generation and Pharmacy Synchronization
- */
-function handleClinicalLogic(ctx) {
-  const rowNum = ctx.range.getRow();
-
-  // 1. Encounter ID Generation
-  pollAndGenerateEncounterId(ctx.sheet, ctx.activeRangeObject, rowNum, ctx.startCol, ctx.headers);
-
-  // 2. Pharmacy Sync Triggers
-  const pharmacyTriggers = ["PATIENT_ID", "ENCOUNTER_ID", "MEDICATION", "STRENGTH_MG_ML", "ROUTE", "DOSAGE", "FREQUENCY", "PHYSICIAN"];
-  if (pharmacyTriggers.includes(ctx.columnName)) {
-    syncToPharmacy(ctx.sheet, rowNum, ctx.startCol, ctx.headers);
-  }
-}
-
-/**
- * Encounter ID sequence logic (Preserved from your code)
+ * Your sequence-based Encounter ID generation with polling
  */
 function pollAndGenerateEncounterId(sheet, encounterRange, rowNum, startCol, headers) {
   const pIdColIdx = headers.indexOf("PATIENT_ID");
@@ -157,6 +152,7 @@ function pollAndGenerateEncounterId(sheet, encounterRange, rowNum, startCol, hea
 
   for (let attempt = 0; attempt < 5; attempt++) {
     SpreadsheetApp.flush(); 
+    
     let patientId = sheet.getRange(rowNum, startCol + pIdColIdx).getValue();
     let dateVal = sheet.getRange(rowNum, startCol + dVisColIdx).getValue();
     let existingEncId = sheet.getRange(rowNum, startCol + encIdColIdx).getValue();
@@ -171,10 +167,14 @@ function pollAndGenerateEncounterId(sheet, encounterRange, rowNum, startCol, hea
       if (dateStr.length === 8) {
         const allData = encounterRange.getValues();
         const relativeRow = rowNum - encounterRange.getRow();
+        
         let count = 0;
         for (let i = 0; i <= relativeRow; i++) {
-          if (allData[i][pIdColIdx].toString() == patientId.toString()) count++;
+          if (allData[i][pIdColIdx].toString() == patientId.toString()) {
+            count++;
+          }
         }
+        
         const sequence = count.toString().padStart(2, '0');
         const finalId = `${dateStr}-${patientId}-${sequence}`;
         sheet.getRange(rowNum, startCol + encIdColIdx).setValue(finalId);
@@ -186,7 +186,7 @@ function pollAndGenerateEncounterId(sheet, encounterRange, rowNum, startCol, hea
 }
 
 /**
- * Pharmacy Sync (Preserves manual pharmacist inputs)
+ * Pharmacy Sync (Maintains Status and Pharmacist Name)
  */
 function syncToPharmacy(encounterSheet, rowNum, startCol, encounterHeaders) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
