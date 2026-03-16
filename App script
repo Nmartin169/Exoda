@@ -1,0 +1,220 @@
+/**
+ * Main Entry Point: Google Sheets Trigger
+ */
+function onEdit(e) {
+  const range = e.range;
+  const sheet = range.getSheet();
+  const source = e.source;
+  const val = e.value;
+
+  if (!val || range.getNumRows() > 1) return;
+
+  const encounterRange = source.getRangeByName("ENCOUNTER_RANGE");
+  if (!encounterRange || !isCellInNamedRange(range, encounterRange)) {
+    handleSimpleTimestamp(e);
+    return;
+  }
+
+  const startRow = encounterRange.getRow();
+  const startCol = encounterRange.getColumn();
+  const headers = sheet.getRange(startRow, startCol, 1, encounterRange.getWidth()).getValues()[0]
+                       .map(h => h.toString().trim().toUpperCase());
+  
+  const colIndex = range.getColumn() - startCol;
+  const columnName = headers[colIndex] || "";
+  const rowNum = range.getRow();
+
+  // 1. HANDLE PATIENT_ID SWAP
+  if (columnName === "PATIENT_ID") {
+    handlePatientIdSwap(e, headers, rowNum, startCol);
+  }
+
+  // 2. HANDLE TIMESTAMPING
+  if (columnName === "DATE_OF_VISIT") {
+    const timeColIdx = headers.indexOf("TIME_OF_VISIT");
+    if (timeColIdx !== -1) {
+      sheet.getRange(rowNum, startCol + timeColIdx).setValue(new Date());
+    }
+  }
+
+  // 3. ENCOUNTER_ID GENERATION
+  pollAndGenerateEncounterId(sheet, encounterRange, rowNum, startCol, headers);
+
+  // 4. SYNC TO PHARMACY (Targeting Pharmacy Table Headers)
+  const pharmacyTriggers = ["MEDICATION", "STRENGTH_MG_ML", "ROUTE", "DOSAGE", "FREQUENCY", "PHYSICIAN"];
+  if (pharmacyTriggers.includes(columnName)) {
+    syncToPharmacy(sheet, rowNum, startCol, headers);
+  }
+}
+
+/**
+ * Enhanced Logic: Map data specifically to PHARMACY table column names
+ */
+function syncToPharmacy(encounterSheet, rowNum, startCol, encounterHeaders) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const pharmacySheet = ss.getSheetByName("Pharmacy");
+  if (!pharmacySheet) return;
+
+  // Get Pharmacy Headers to find target columns dynamically
+  const pharmacyDataAll = pharmacySheet.getDataRange().getValues();
+  const pharmacyHeaders = pharmacyDataAll[0].map(h => h.toString().trim().toUpperCase());
+  
+  // Specific columns to mirror from Encounter to Pharmacy
+  const colsToMirror = [
+    "PATIENT_ID", "DATE_OF_VISIT", "TIME_OF_VISIT", "ENCOUNTER_ID", 
+    "MEDICATION", "STRENGTH_MG_ML", "ROUTE", "DOSAGE", "FREQUENCY", "PHYSICIAN"
+  ];
+
+  const encIdIdxEncounter = encounterHeaders.indexOf("ENCOUNTER_ID");
+  const encounterId = encounterSheet.getRange(rowNum, startCol + encIdIdxEncounter).getValue();
+
+  // Exit if ID isn't ready; the pollAndGenerateEncounterId function will re-trigger this once ID exists
+  if (!encounterId || encounterId === "") return;
+
+  // Find if Encounter ID already exists in Pharmacy to prevent duplicates
+  const pEncIdIdx = pharmacyHeaders.indexOf("ENCOUNTER_ID");
+  let targetRow = -1;
+  if (pEncIdIdx !== -1) {
+    for (let i = 1; i < pharmacyDataAll.length; i++) {
+      if (pharmacyDataAll[i][pEncIdIdx] === encounterId) {
+        targetRow = i + 1;
+        break;
+      }
+    }
+  }
+
+  // Determine row to write to (update existing or append new)
+  const writeRow = (targetRow !== -1) ? targetRow : pharmacySheet.getLastRow() + 1;
+
+  // Map each requested column from Encounter to its specific header index in Pharmacy
+  colsToMirror.forEach(colName => {
+    const srcIdx = encounterHeaders.indexOf(colName);
+    const destIdx = pharmacyHeaders.indexOf(colName);
+
+    if (srcIdx !== -1 && destIdx !== -1) {
+      const value = encounterSheet.getRange(rowNum, startCol + srcIdx).getValue();
+      pharmacySheet.getRange(writeRow, destIdx + 1).setValue(value);
+    }
+  });
+}
+
+/**
+ * Corrected Polling Logic for Encounter ID
+ */
+function pollAndGenerateEncounterId(sheet, encounterRange, rowNum, startCol, headers) {
+  const pIdColIdx = headers.indexOf("PATIENT_ID");
+  const dVisColIdx = headers.indexOf("DATE_OF_VISIT");
+  const encIdColIdx = headers.indexOf("ENCOUNTER_ID");
+
+  if (pIdColIdx === -1 || dVisColIdx === -1 || encIdColIdx === -1) return;
+
+  for (let attempt = 0; attempt < 5; attempt++) {
+    SpreadsheetApp.flush(); 
+    let patientId = sheet.getRange(rowNum, startCol + pIdColIdx).getValue();
+    let dateVal = sheet.getRange(rowNum, startCol + dVisColIdx).getValue();
+    let existingEncId = sheet.getRange(rowNum, startCol + encIdColIdx).getValue();
+
+    if (existingEncId) break;
+
+    if (patientId && dateVal && patientId !== "" && dateVal !== "") {
+      let dateStr = (dateVal instanceof Date) 
+        ? Utilities.formatDate(dateVal, Session.getScriptTimeZone(), "yyyyMMdd")
+        : dateVal.toString().replace(/[^0-9]/g, "").substring(0, 8);
+
+      if (dateStr.length === 8) {
+        const allData = encounterRange.getValues();
+        const relativeRow = rowNum - encounterRange.getRow();
+        let count = 0;
+        for (let i = 0; i <= relativeRow; i++) {
+          if (allData[i][pIdColIdx].toString() == patientId.toString()) count++;
+        }
+        const sequence = count.toString().padStart(2, '0');
+        const finalId = `${dateStr}-${patientId}-${sequence}`;
+        sheet.getRange(rowNum, startCol + encIdColIdx).setValue(finalId);
+        
+        // Immediate Pharmacy Sync: If medication was already typed while waiting for ID
+        const medIdx = headers.indexOf("MEDICATION");
+        if (medIdx !== -1 && sheet.getRange(rowNum, startCol + medIdx).getValue() !== "") {
+          syncToPharmacy(sheet, rowNum, startCol, headers);
+        }
+        break; 
+      }
+    }
+    Utilities.sleep(1000);
+  }
+}
+
+/**
+ * Logic for Swapping Names to IDs
+ */
+function handlePatientIdSwap(e, headers, rowNum, startCol) {
+  const source = e.source;
+  const visitRange = source.getRangeByName("VISIT_RANGE");
+  if (!visitRange) return;
+
+  const vData = visitRange.getValues();
+  const vHeaders = vData[0].map(h => h.toString().trim().toUpperCase());
+  const nameIdx = vHeaders.indexOf("PATIENT_NAME");
+  const idIdx = vHeaders.indexOf("PATIENT_ID");
+  const dobIdx = vHeaders.indexOf("DATE_OF_BIRTH");
+
+  const match = vData.find(r => r[nameIdx].toString().trim() == e.value.toString().trim());
+  if (match) {
+    const pId = match[idIdx];
+    const rule = e.range.getDataValidation();
+    e.range.setDataValidation(null);
+    e.range.setValue(pId);
+    
+    const ageColIdx = headers.indexOf("AGE");
+    if (ageColIdx !== -1 && match[dobIdx] instanceof Date) {
+      e.range.getSheet().getRange(rowNum, startCol + ageColIdx).setValue(calculateAge(match[dobIdx]));
+    }
+
+    const vIdColIdx = headers.indexOf("VISIT_ID");
+    if (vIdColIdx !== -1) {
+      e.range.getSheet().getRange(rowNum, startCol + vIdColIdx).setValue(getRecentVisit(vData, vHeaders, pId));
+    }
+
+    SpreadsheetApp.flush();
+    if (rule) e.range.setDataValidation(rule);
+  }
+}
+
+/**
+ * Standard Helpers
+ */
+function handleSimpleTimestamp(e) {
+  const sheet = e.range.getSheet();
+  const row = e.range.getRow();
+  const headers = sheet.getRange(row, 1, 1, 20).getValues()[0];
+  const colIndex = e.range.getColumn() - 1;
+  const colName = headers[colIndex] ? headers[colIndex].toString().trim().toUpperCase() : "";
+  
+  if (colName === "DATE_OF_VISIT" || colName === "DATE_OF_DEPARTURE") {
+    e.range.offset(0, 1).setValue(new Date());
+  }
+}
+
+function getRecentVisit(data, headers, pId) {
+  const pIdx = headers.indexOf("PATIENT_ID");
+  const vIdx = headers.indexOf("VISIT_ID");
+  const matches = data.filter(r => r[pIdx].toString() == pId.toString() && r[vIdx]).map(r => r[vIdx].toString()).sort().reverse();
+  return matches.length > 0 ? matches[0] : "";
+}
+
+function calculateAge(dob) {
+  const today = new Date();
+  let age = today.getFullYear() - dob.getFullYear();
+  const m = today.getMonth() - dob.getMonth();
+  if (m < 0 || (m === 0 && today.getDate() < dob.getDate())) age--;
+  return age;
+}
+
+function isCellInNamedRange(cell, nr) {
+  const sheetName = cell.getSheet().getName();
+  const nrSheetName = nr.getSheet().getName();
+  if (sheetName !== nrSheetName) return false;
+  const r = cell.getRow();
+  const c = cell.getColumn();
+  return (r >= nr.getRow() && r <= nr.getLastRow() && c >= nr.getColumn() && c <= nr.getLastColumn());
+}
