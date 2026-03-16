@@ -4,7 +4,7 @@
 function onOpen() {
   const ui = SpreadsheetApp.getUi();
   ui.createMenu('🏥 EHR System')
-      .addItem('Refresh Pharmacy (Clear & Sync)', 'INITIAL_SYNC_ALL_DATA')
+      .addItem('Refresh Pharmacy (Maintain Status)', 'INITIAL_SYNC_ALL_DATA')
       .addToUi();
 }
 
@@ -81,8 +81,6 @@ function handleTimestamping(ctx) {
     if (ctx.e.value === "") {
       targetCell.clearContent();
     } else {
-      // Removed .setNumberFormat() to prevent the "Typed Column" error.
-      // Ensure the destination column in your sheet is formatted as Time (Format > Number > Time).
       targetCell.setValue(new Date());
     }
   }
@@ -111,48 +109,37 @@ function handleEncounterLogic(ctx) {
 }
 
 /**
- * FULL SYNC: PRESERVED FULL LOGIC
+ * NEW INITIAL_SYNC_ALL_DATA: Updates or Appends WITHOUT clearing.
+ * This preserves manual Pharmacist entries (Status, Name).
  */
 function INITIAL_SYNC_ALL_DATA() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const encounterRange = ss.getRangeByName("ENCOUNTER_RANGE");
-  const pharmacyRange = ss.getRangeByName("PHARMACY_RANGE");
-  
-  if (!encounterRange || !pharmacyRange) {
-    SpreadsheetApp.getUi().alert("Error: Ensure both ENCOUNTER_RANGE and PHARMACY_RANGE are defined.");
-    return;
-  }
+  if (!encounterRange) return;
 
   const encounterSheet = encounterRange.getSheet();
   const encounterData = encounterRange.getValues();
   const encounterHeaders = encounterData[0].map(h => h.toString().trim().toUpperCase());
   
-  const pSheet = pharmacyRange.getSheet();
-  const pStartRow = pharmacyRange.getRow();
-  const pStartCol = pharmacyRange.getColumn();
-  const pWidth = pharmacyRange.getWidth();
-
-  if (pharmacyRange.getHeight() > 1) {
-    pSheet.getRange(pStartRow + 1, pStartCol, pharmacyRange.getHeight() - 1, pWidth).clearContent();
-  }
-
   let syncCount = 0;
+  // Loop through Encounter data and sync each row individually
+  // syncToPharmacy handles the "Update if exists, Append if new" logic
   for (let i = 1; i < encounterData.length; i++) {
     const encId = encounterData[i][encounterHeaders.indexOf("ENCOUNTER_ID")];
-    const medication = encounterData[i][encounterHeaders.indexOf("MEDICATION")];
     
-    if (encId && medication) {
+    if (encId && encId !== "") {
       const rowNum = encounterRange.getRow() + i;
       const startCol = encounterRange.getColumn();
       syncToPharmacy(encounterSheet, rowNum, startCol, encounterHeaders);
       syncCount++;
     }
   }
-  SpreadsheetApp.getUi().alert('Success: Pharmacy cleared and ' + syncCount + ' orders appended in order.');
+  SpreadsheetApp.getUi().alert('Success: Pharmacy updated. ' + syncCount + ' records processed. Pharmacist notes were preserved.');
 }
 
 /**
- * Standard Sync: PRESERVED FULL LOGIC
+ * Standard Sync: Finds existing row by ID to update, or appends to bottom if new.
+ * Preserves columns not in the "colsToMirror" list.
  */
 function syncToPharmacy(encounterSheet, rowNum, startCol, encounterHeaders) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
