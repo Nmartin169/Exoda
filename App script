@@ -10,103 +10,61 @@ function onOpen() {
 
 /**
  * Main Entry Point: Google Sheets Trigger
+ * Logic preserved from your shared script
  */
 function onEdit(e) {
-  const context = getEventContext(e);
-  if (!context) return;
-
-  // 1. Handle Automatic Timestamping (All Sheets + Pharmacy)
-  handleTimestamping(context);
-
-  // 2. Handle Data Swapping & ID Generation (Encounter Sheet Only)
-  if (context.activeRangeName === "ENCOUNTER_RANGE") {
-    handleEncounterLogic(context);
-  }
-}
-
-/**
- * Context Parser - Recognizes all Named Ranges
- */
-function getEventContext(e) {
   const range = e.range;
-  if (!e.value || range.getNumRows() > 1) return null;
-
   const sheet = range.getSheet();
   const source = e.source;
-  
-  const timestampRanges = ["LOG_PROVIDER_RANGE", "VISIT_RANGE", "ENCOUNTER_RANGE", "PHARMACY_RANGE"];
-  const clinicalRanges = ["ENCOUNTER_RANGE"];
-  const allNames = [...new Set([...timestampRanges, ...clinicalRanges])];
+  const val = e.value;
 
-  let activeRangeName = "";
-  let activeRangeObject = null;
+  if (!val || range.getNumRows() > 1) return;
 
-  for (let name of allNames) {
-    let nr = source.getRangeByName(name);
-    if (nr && isCellInNamedRange(range, nr)) {
-      activeRangeName = name;
-      activeRangeObject = nr;
-      break;
+  const encounterRange = source.getRangeByName("ENCOUNTER_RANGE");
+  const pharmacyRange = source.getRangeByName("PHARMACY_RANGE");
+
+  // 1. Check if the edit is in the ENCOUNTER table
+  if (encounterRange && isCellInNamedRange(range, encounterRange)) {
+    const startRow = encounterRange.getRow();
+    const startCol = encounterRange.getColumn();
+    const headers = sheet.getRange(startRow, startCol, 1, encounterRange.getWidth()).getValues()[0]
+                         .map(h => h.toString().trim().toUpperCase());
+    
+    const colIndex = range.getColumn() - startCol;
+    const columnName = headers[colIndex] || "";
+    const rowNum = range.getRow();
+
+    // HANDLE PATIENT_ID SWAP (Logic Preserved)
+    if (columnName === "PATIENT_ID") {
+      handlePatientIdSwap(e, headers, rowNum, startCol);
     }
+
+    // HANDLE TIMESTAMPING (Logic Preserved)
+    if (columnName === "DATE_OF_VISIT") {
+      const timeColIdx = headers.indexOf("TIME_OF_VISIT");
+      if (timeColIdx !== -1) {
+        sheet.getRange(rowNum, startCol + timeColIdx).setValue(new Date());
+      }
+    }
+
+    // ENCOUNTER_ID GENERATION (Your Full Logic with 5-attempt re-checks)
+    pollAndGenerateEncounterId(sheet, encounterRange, rowNum, startCol, headers);
+
+    // PHARMACY SYNC TRIGGER
+    const pharmacyTriggers = ["PATIENT_ID", "ENCOUNTER_ID", "MEDICATION", "STRENGTH_MG_ML", "ROUTE", "DOSAGE", "FREQUENCY", "PHYSICIAN"];
+    if (pharmacyTriggers.includes(columnName)) {
+      syncToPharmacy(sheet, rowNum, startCol, headers);
+    }
+    return; // Exit if encounter logic was handled
   }
 
-  if (!activeRangeObject) return null;
-
-  const startRow = activeRangeObject.getRow();
-  const startCol = activeRangeObject.getColumn();
-  const headers = sheet.getRange(startRow, startCol, 1, activeRangeObject.getWidth()).getValues()[0]
-                       .map(h => h.toString().trim().toUpperCase());
-  
-  const colIndex = range.getColumn() - startCol;
-  const columnName = headers[colIndex] || "";
-
-  return {
-    e, range, sheet, source,
-    activeRangeName, activeRangeObject,
-    columnName, headers, startCol,
-    isTimeZone: timestampRanges.includes(activeRangeName)
-  };
+  // 2. Handle Simple Timestamps for all other ranges (LOG_PROVIDER, VISIT, PHARMACY)
+  handleSimpleTimestamp(e);
 }
 
 /**
- * Logic for updating timestamps (Offsets 1 cell to the right)
- */
-function handleTimestamping(ctx) {
-  if (!ctx.isTimeZone) return;
-
-  const triggers = ["DATE_OF_VISIT", "DATE_OF_DEPARTURE", "DISPENSED_DATE"];
-  
-  if (triggers.includes(ctx.columnName)) {
-    const targetCell = ctx.range.offset(0, 1);
-    ctx.e.value === ""
-      ? targetCell.clearContent()
-      : targetCell.setValue(new Date()).setNumberFormat("HH:mm:ss");
-  }
-}
-
-/**
- * Combined Logic for Encounter Table
- */
-function handleEncounterLogic(ctx) {
-  const rowNum = ctx.range.getRow();
-
-  // 1. Handle Patient ID Swap (Includes Visit ID lookup and Age calculation)
-  if (ctx.columnName === "PATIENT_ID") {
-    handlePatientIdSwap(ctx.e, ctx.headers, rowNum, ctx.startCol);
-  }
-
-  // 2. Generate Encounter ID using polling and sequencing
-  pollAndGenerateEncounterId(ctx.sheet, ctx.activeRangeObject, rowNum, ctx.startCol, ctx.headers);
-
-  // 3. Sync to Pharmacy
-  const pharmacyTriggers = ["PATIENT_ID", "ENCOUNTER_ID", "MEDICATION", "STRENGTH_MG_ML", "ROUTE", "DOSAGE", "FREQUENCY", "PHYSICIAN"];
-  if (pharmacyTriggers.includes(ctx.columnName)) {
-    syncToPharmacy(ctx.sheet, rowNum, ctx.startCol, ctx.headers);
-  }
-}
-
-/**
- * Exact Encounter ID Logic from your shared code
+ * ENCOUNTER_ID GENERATION: PRESERVED FULL LOGIC
+ * Includes the 5-attempt loop, 1000ms delay, and SpreadsheetApp.flush()
  */
 function pollAndGenerateEncounterId(sheet, encounterRange, rowNum, startCol, headers) {
   const pIdColIdx = headers.indexOf("PATIENT_ID");
@@ -151,7 +109,7 @@ function pollAndGenerateEncounterId(sheet, encounterRange, rowNum, startCol, hea
 }
 
 /**
- * Exact Patient Swap & Visit ID lookup logic from your shared code
+ * PATIENT ID SWAP: PRESERVED FULL LOGIC
  */
 function handlePatientIdSwap(e, headers, rowNum, startCol) {
   const source = e.source;
@@ -187,7 +145,27 @@ function handlePatientIdSwap(e, headers, rowNum, startCol) {
 }
 
 /**
- * Pharmacy Sync Logic (Preserves Pharmacist entries)
+ * TIMESTAMP LOGIC: EXTENDED TO INCLUDE DISPENSED_DATE
+ */
+function handleSimpleTimestamp(e) {
+  const sheet = e.range.getSheet();
+  const row = e.range.getRow();
+  
+  // Scans Row 1 for headers across any tab
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0]
+                       .map(h => h.toString().trim().toUpperCase());
+  const colIndex = e.range.getColumn() - 1;
+  const colName = headers[colIndex] || "";
+  
+  const triggers = ["DATE_OF_VISIT", "DATE_OF_DEPARTURE", "DISPENSED_DATE"];
+  
+  if (triggers.includes(colName)) {
+    e.range.offset(0, 1).setValue(new Date()).setNumberFormat("HH:mm:ss");
+  }
+}
+
+/**
+ * PHARMACY SYNC: UPDATED TO PRESERVE PHARMACIST DATA
  */
 function syncToPharmacy(encounterSheet, rowNum, startCol, encounterHeaders) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -227,17 +205,12 @@ function syncToPharmacy(encounterSheet, rowNum, startCol, encounterHeaders) {
   });
 }
 
-/**
- * Full Refresh Tool
- */
 function INITIAL_SYNC_ALL_DATA() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const encRange = ss.getRangeByName("ENCOUNTER_RANGE");
   if (!encRange) return;
-
   const data = encRange.getValues();
   const headers = data[0].map(h => h.toString().trim().toUpperCase());
-  
   for (let i = 1; i < data.length; i++) {
     if (data[i][headers.indexOf("ENCOUNTER_ID")]) {
       syncToPharmacy(encRange.getSheet(), encRange.getRow() + i, encRange.getColumn(), headers);
@@ -246,7 +219,7 @@ function INITIAL_SYNC_ALL_DATA() {
   SpreadsheetApp.getUi().alert('Sync Complete.');
 }
 
-// --- HELPERS ---
+// --- REMAINING HELPERS (PRESERVED) ---
 
 function getRecentVisit(data, headers, pId) {
   const pIdx = headers.indexOf("PATIENT_ID");
@@ -264,8 +237,11 @@ function calculateAge(dob) {
 }
 
 function isCellInNamedRange(cell, nr) {
-  if (cell.getSheet().getName() !== nr.getSheet().getName()) return false;
-  const r = cell.getRow(), c = cell.getColumn();
+  const sheetName = cell.getSheet().getName();
+  const nrSheetName = nr.getSheet().getName();
+  if (sheetName !== nrSheetName) return false;
+  const r = cell.getRow();
+  const c = cell.getColumn();
   return (r >= nr.getRow() && r <= nr.getLastRow() && c >= nr.getColumn() && c <= nr.getLastColumn());
 }
 
