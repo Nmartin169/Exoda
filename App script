@@ -11,19 +11,19 @@ function onOpen() {
 
 /**
  * Main Entry Point: Google Sheets Trigger
- * Optimized for bulk pastes (Google Forms / Manual Copy-Paste)
  */
 function onEdit(e) {
-  if (!e) return;
   const range = e.range;
   const source = e.source;
   
-  // 1. Identify if the edit happened within a known Named Range
-  const timestampRanges = ["LOG_PROVIDER_RANGE", "VISIT_RANGE", "ENCOUNTER_RANGE", "PHARMACY_RANGE", "PROVIDER_ENTRY_RANGE"];
+  // Define all ranges that should trigger logic
+  const activeRanges = ["LOG_PROVIDER_RANGE", "VISIT_RANGE", "ENCOUNTER_RANGE", "PHARMACY_RANGE", "PROVIDER_ENTRY_RANGE"];
+  
   let activeRangeName = "";
   let activeRangeObject = null;
 
-  for (let name of timestampRanges) {
+  // Identify which named range was edited
+  for (let name of activeRanges) {
     let nr = source.getRangeByName(name);
     if (nr && isCellInNamedRange(range, nr)) {
       activeRangeName = name;
@@ -34,27 +34,26 @@ function onEdit(e) {
 
   if (!activeRangeObject) return;
 
-  // 2. Loop through every row in the edited range (Handles Bulk Pastes)
+  // Handle Multi-row edits (e.g., pastes)
   const startRow = range.getRow();
   const numRows = range.getNumRows();
 
   for (let i = 0; i < numRows; i++) {
-    const currentRowNum = startRow + i;
-    // Create a specific context for this single row within the edit
-    const rowRange = range.getSheet().getRange(currentRowNum, range.getColumn(), 1, range.getWidth());
-    const context = getEventContextForRow(e, rowRange, activeRangeName, activeRangeObject);
+    const currentRow = startRow + i;
+    const currentRange = range.offset(i, 0, 1, range.getNumColumns());
     
+    const context = getEventContext(e, currentRange, activeRangeName, activeRangeObject);
     if (!context) continue;
 
-    // A. Handle Automatic Timestamping
+    // 1. Handle Automatic Timestamping
     handleTimestamping(context);
 
-    // B. Handle Encounter-Specific Logic
+    // 2. Handle Encounter-Specific Logic
     if (context.activeRangeName === "ENCOUNTER_RANGE") {
       handleEncounterLogic(context);
     }
 
-    // C. Handle Provider Entry Sync
+    // 3. Handle Provider Entry Sync Logic
     if (context.activeRangeName === "PROVIDER_ENTRY_RANGE") {
       handleProviderSync(context);
     }
@@ -62,35 +61,79 @@ function onEdit(e) {
 }
 
 /**
- * Context Parser: Adapted to handle specific rows during bulk edits
+ * Context Parser
  */
-function getEventContextForRow(e, rowRange, activeRangeName, activeRangeObject) {
-  const sheet = rowRange.getSheet();
+function getEventContext(e, specificRange, activeRangeName, activeRangeObject) {
+  const sheet = specificRange.getSheet();
+  const source = e.source;
   const startRow = activeRangeObject.getRow();
   const startCol = activeRangeObject.getColumn();
   
   const headers = sheet.getRange(startRow, startCol, 1, activeRangeObject.getWidth()).getValues()[0]
                        .map(h => h.toString().trim().toUpperCase());
   
-  const colIndex = rowRange.getColumn() - startCol;
+  const colIndex = specificRange.getColumn() - startCol;
   const columnName = headers[colIndex] || "";
+
+  const timestampRanges = ["LOG_PROVIDER_RANGE", "VISIT_RANGE", "ENCOUNTER_RANGE", "PHARMACY_RANGE", "PROVIDER_ENTRY_RANGE"];
 
   return {
     e, 
-    range: rowRange, 
+    range: specificRange, 
     sheet, 
-    source: e.source,
+    source,
     activeRangeName, 
     activeRangeObject,
     columnName, 
     headers, 
     startCol,
-    isTimestampZone: true // Only gets here if it's in a timestamp-enabled range
+    isTimestampZone: timestampRanges.includes(activeRangeName)
   };
 }
 
 /**
- * Provider Sync: Maps Entry Table to Registry Table
+ * Automatic Timestamping
+ */
+function handleTimestamping(ctx) {
+  if (!ctx.isTimestampZone) return;
+
+  const triggers = ["DATE_OF_VISIT", "DATE_OF_DEPARTURE", "DISPENSED_DATE"];
+  
+  if (triggers.includes(ctx.columnName)) {
+    const targetCell = ctx.range.offset(0, 1);
+    const val = ctx.range.getValue();
+    if (val === "") {
+      targetCell.clearContent();
+    } else {
+      targetCell.setValue(new Date());
+    }
+  }
+}
+
+/**
+ * Encounter Table Logic
+ */
+function handleEncounterLogic(ctx) {
+  const rowNum = ctx.range.getRow();
+
+  if (ctx.columnName === "PATIENT_ID") {
+    handlePatientIdSwap(ctx.e, ctx.headers, rowNum, ctx.startCol);
+  }
+
+  pollAndGenerateEncounterId(ctx.sheet, ctx.activeRangeObject, rowNum, ctx.startCol, ctx.headers);
+
+  const pharmacyTriggers = [
+    "PATIENT_ID", "ENCOUNTER_ID", "MEDICATION", "STRENGTH_MG_ML", 
+    "ROUTE", "DOSAGE", "FREQUENCY", "PHYSICIAN"
+  ];
+
+  if (pharmacyTriggers.includes(ctx.columnName)) {
+    syncToPharmacy(ctx.sheet, rowNum, ctx.startCol, ctx.headers);
+  }
+}
+
+/**
+ * Provider Sync Logic: Maps Entry to Registry
  */
 function handleProviderSync(ctx) {
   const ss = ctx.source;
@@ -103,6 +146,7 @@ function handleProviderSync(ctx) {
   const targetHeaders = targetSheet.getRange(tStartRow, tStartCol, 1, targetRange.getWidth()).getValues()[0]
                                    .map(h => h.toString().trim().toUpperCase());
 
+  // Mapping: "SOURCE_COLUMN_NAME": "DESTINATION_COLUMN_NAME"
   const mapping = {
     "PROVIDER NAME": "PROVIDER_NAME",
     "DATE OF BIRTH": "DATE_OF_BIRTH",
@@ -111,19 +155,19 @@ function handleProviderSync(ctx) {
   };
 
   const rowNum = ctx.range.getRow();
-  const nameIdx = ctx.headers.indexOf("PROVIDER NAME");
-  if (nameIdx === -1) return;
+  const providerNameIdx = ctx.headers.indexOf("PROVIDER NAME");
+  if (providerNameIdx === -1) return;
+  
+  const providerName = ctx.sheet.getRange(rowNum, ctx.startCol + providerNameIdx).getValue();
+  if (!providerName || providerName === "") return;
 
-  const providerName = ctx.sheet.getRange(rowNum, ctx.startCol + nameIdx).getValue();
-  if (!providerName) return;
-
-  // Check for existing entry to update or find new row
+  // Check for existing record to update
   const targetData = targetRange.getValues();
-  const targetNameIdx = targetHeaders.indexOf("PROVIDER_NAME");
+  const nameColIdx = targetHeaders.indexOf("PROVIDER_NAME");
   let targetRow = -1;
 
   for (let i = 1; i < targetData.length; i++) {
-    if (targetData[i][targetNameIdx].toString().toLowerCase() === providerName.toString().toLowerCase()) {
+    if (targetData[i][nameColIdx].toString().trim().toUpperCase() === providerName.toString().trim().toUpperCase()) {
       targetRow = tStartRow + i;
       break;
     }
@@ -134,46 +178,16 @@ function handleProviderSync(ctx) {
   for (let entryHead in mapping) {
     const srcIdx = ctx.headers.indexOf(entryHead);
     const destIdx = targetHeaders.indexOf(mapping[entryHead]);
+
     if (srcIdx !== -1 && destIdx !== -1) {
-      const val = ctx.sheet.getRange(rowNum, ctx.startCol + srcIdx).getValue();
-      targetSheet.getRange(writeRow, tStartCol + destIdx).setValue(val);
+      const value = ctx.sheet.getRange(rowNum, ctx.startCol + srcIdx).getValue();
+      targetSheet.getRange(writeRow, tStartCol + destIdx).setValue(value);
     }
   }
 }
 
 /**
- * Encounter Logic
- */
-function handleEncounterLogic(ctx) {
-  const rowNum = ctx.range.getRow();
-  if (ctx.columnName === "PATIENT_ID") {
-    handlePatientIdSwap(ctx.e, ctx.headers, rowNum, ctx.startCol);
-  }
-  pollAndGenerateEncounterId(ctx.sheet, ctx.activeRangeObject, rowNum, ctx.startCol, ctx.headers);
-  
-  const pharmacyTriggers = ["PATIENT_ID", "ENCOUNTER_ID", "MEDICATION", "STRENGTH_MG_ML", "ROUTE", "DOSAGE", "FREQUENCY", "PHYSICIAN"];
-  if (pharmacyTriggers.includes(ctx.columnName)) {
-    syncToPharmacy(ctx.sheet, rowNum, ctx.startCol, ctx.headers);
-  }
-}
-
-/**
- * Timestamping Logic
- */
-function handleTimestamping(ctx) {
-  const triggers = ["DATE_OF_VISIT", "DATE_OF_DEPARTURE", "DISPENSED_DATE"];
-  if (triggers.includes(ctx.columnName)) {
-    const targetCell = ctx.range.offset(0, 1);
-    if (ctx.range.getValue() === "") {
-      targetCell.clearContent();
-    } else {
-      targetCell.setValue(new Date());
-    }
-  }
-}
-
-/**
- * Pharmacy Sync
+ * Pharmacy Sync: Updates existing or appends new
  */
 function syncToPharmacy(encounterSheet, rowNum, startCol, encounterHeaders) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -186,118 +200,173 @@ function syncToPharmacy(encounterSheet, rowNum, startCol, encounterHeaders) {
   const pharmacyHeaders = pharmacySheet.getRange(pStartRow, pStartCol, 1, pharmacyRange.getWidth()).getValues()[0]
                                        .map(h => h.toString().trim().toUpperCase());
   
-  const colsToMirror = ["PATIENT_ID", "DATE_OF_VISIT", "TIME_OF_VISIT", "ENCOUNTER_ID", "MEDICATION", "STRENGTH_MG_ML", "ROUTE", "DOSAGE", "FREQUENCY", "PHYSICIAN"];
-  const encounterId = encounterSheet.getRange(rowNum, startCol + encounterHeaders.indexOf("ENCOUNTER_ID")).getValue();
+  const colsToMirror = [
+    "PATIENT_ID", "DATE_OF_VISIT", "TIME_OF_VISIT", "ENCOUNTER_ID", 
+    "MEDICATION", "STRENGTH_MG_ML", "ROUTE", "DOSAGE", "FREQUENCY", "PHYSICIAN"
+  ];
+
+  const encIdIdxEncounter = encounterHeaders.indexOf("ENCOUNTER_ID");
+  const encounterId = encounterSheet.getRange(rowNum, startCol + encIdIdxEncounter).getValue();
+
   if (!encounterId) return;
 
-  const pharmacyData = pharmacyRange.getValues();
   const pEncIdIdx = pharmacyHeaders.indexOf("ENCOUNTER_ID");
+  const pharmacyData = pharmacyRange.getValues();
   let targetRow = -1;
   
-  for (let i = 1; i < pharmacyData.length; i++) {
-    if (pharmacyData[i][pEncIdIdx] === encounterId) {
-      targetRow = pStartRow + i;
-      break;
+  if (pEncIdIdx !== -1) {
+    for (let i = 1; i < pharmacyData.length; i++) {
+      if (pharmacyData[i][pEncIdIdx] === encounterId) {
+        targetRow = pStartRow + i; 
+        break;
+      }
     }
   }
 
   const writeRow = (targetRow !== -1) ? targetRow : getFirstEmptyRowInRange(pharmacyRange);
+
   colsToMirror.forEach(colName => {
     const srcIdx = encounterHeaders.indexOf(colName);
     const destIdx = pharmacyHeaders.indexOf(colName);
     if (srcIdx !== -1 && destIdx !== -1) {
-      const val = encounterSheet.getRange(rowNum, startCol + srcIdx).getValue();
-      pharmacySheet.getRange(writeRow, pStartCol + destIdx).setValue(val);
+      const value = encounterSheet.getRange(rowNum, startCol + srcIdx).getValue();
+      pharmacySheet.getRange(writeRow, pStartCol + destIdx).setValue(value);
     }
   });
 }
 
 /**
- * Menu Function: Initial Sync Pharmacy
+ * Bulk Pharmacy Sync
  */
 function INITIAL_SYNC_ALL_DATA() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const encounterRange = ss.getRangeByName("ENCOUNTER_RANGE");
   if (!encounterRange) return;
-  const data = encounterRange.getValues();
-  const headers = data[0].map(h => h.toString().trim().toUpperCase());
-  for (let i = 1; i < data.length; i++) {
-    if (data[i][headers.indexOf("ENCOUNTER_ID")]) {
-      syncToPharmacy(encounterRange.getSheet(), encounterRange.getRow() + i, encounterRange.getColumn(), headers);
+
+  const encounterSheet = encounterRange.getSheet();
+  const encounterData = encounterRange.getValues();
+  const encounterHeaders = encounterData[0].map(h => h.toString().trim().toUpperCase());
+  
+  let syncCount = 0;
+  for (let i = 1; i < encounterData.length; i++) {
+    const encId = encounterData[i][encounterHeaders.indexOf("ENCOUNTER_ID")];
+    if (encId && encId !== "") {
+      syncToPharmacy(encounterSheet, encounterRange.getRow() + i, encounterRange.getColumn(), encounterHeaders);
+      syncCount++;
     }
   }
-  SpreadsheetApp.getUi().alert('Pharmacy Sync Complete.');
+  SpreadsheetApp.getUi().alert('Pharmacy updated. ' + syncCount + ' records processed.');
 }
 
 /**
- * Menu Function: Bulk Sync Provider Registry
+ * Bulk Provider Sync
  */
 function SYNC_PROVIDER_REGISTRY_BULK() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const entryRange = ss.getRangeByName("PROVIDER_ENTRY_RANGE");
   if (!entryRange) return;
+
+  const sheet = entryRange.getSheet();
   const data = entryRange.getValues();
   const headers = data[0].map(h => h.toString().trim().toUpperCase());
+
+  let count = 0;
   for (let i = 1; i < data.length; i++) {
-    if (data[i][headers.indexOf("PROVIDER NAME")]) {
-      handleProviderSync({
-        source: ss, sheet: entryRange.getSheet(), range: entryRange.offset(i, 0, 1, 1),
-        headers: headers, startCol: entryRange.getColumn()
-      });
+    if (data[i][headers.indexOf("PROVIDER NAME")] !== "") {
+      const ctx = {
+        source: ss,
+        sheet: sheet,
+        range: entryRange.offset(i, 0, 1, 1),
+        headers: headers,
+        startCol: entryRange.getColumn()
+      };
+      handleProviderSync(ctx);
+      count++;
     }
   }
-  SpreadsheetApp.getUi().alert('Provider Registry Sync Complete.');
+  SpreadsheetApp.getUi().alert('Sync Complete: ' + count + ' provider records processed.');
 }
 
 /**
- * HELPERS & CORE LOGIC
+ * Patient ID Swap Logic
+ */
+function handlePatientIdSwap(e, headers, rowNum, startCol) {
+  const source = e.source;
+  const visitRange = source.getRangeByName("VISIT_RANGE");
+  if (!visitRange) return;
+
+  const vData = visitRange.getValues();
+  const vHeaders = vData[0].map(h => h.toString().trim().toUpperCase());
+  const nameIdx = vHeaders.indexOf("PATIENT_NAME");
+  const idIdx = vHeaders.indexOf("PATIENT_ID");
+  const dobIdx = vHeaders.indexOf("DATE_OF_BIRTH");
+
+  const match = vData.find(r => r[nameIdx].toString().trim() == e.value.toString().trim());
+  if (match) {
+    const pId = match[idIdx];
+    const rule = e.range.getDataValidation();
+    e.range.setDataValidation(null);
+    e.range.setValue(pId);
+    
+    const ageColIdx = headers.indexOf("AGE");
+    if (ageColIdx !== -1 && match[dobIdx] instanceof Date) {
+      e.range.getSheet().getRange(rowNum, startCol + ageColIdx).setValue(calculateAge(match[dobIdx]));
+    }
+
+    const vIdColIdx = headers.indexOf("VISIT_ID");
+    if (vIdColIdx !== -1) {
+      e.range.getSheet().getRange(rowNum, startCol + vIdColIdx).setValue(getRecentVisit(vData, vHeaders, pId));
+    }
+
+    SpreadsheetApp.flush();
+    if (rule) e.range.setDataValidation(rule);
+  }
+}
+
+/**
+ * Encounter ID Generation
  */
 function pollAndGenerateEncounterId(sheet, encounterRange, rowNum, startCol, headers) {
   const pIdColIdx = headers.indexOf("PATIENT_ID");
   const dVisColIdx = headers.indexOf("DATE_OF_VISIT");
   const encIdColIdx = headers.indexOf("ENCOUNTER_ID");
+
   if (pIdColIdx === -1 || dVisColIdx === -1 || encIdColIdx === -1) return;
 
   for (let attempt = 0; attempt < 3; attempt++) {
-    SpreadsheetApp.flush();
-    let pId = sheet.getRange(rowNum, startCol + pIdColIdx).getValue();
+    SpreadsheetApp.flush(); 
+    let patientId = sheet.getRange(rowNum, startCol + pIdColIdx).getValue();
     let dateVal = sheet.getRange(rowNum, startCol + dVisColIdx).getValue();
-    if (sheet.getRange(rowNum, startCol + encIdColIdx).getValue()) break;
+    let existingEncId = sheet.getRange(rowNum, startCol + encIdColIdx).getValue();
 
-    if (pId && dateVal) {
-      let dateStr = (dateVal instanceof Date) ? Utilities.formatDate(dateVal, Session.getScriptTimeZone(), "yyyyMMdd") : dateVal.toString().replace(/[^0-9]/g, "").substring(0, 8);
-      const allData = encounterRange.getValues();
-      let count = 0;
-      for (let i = 0; i <= (rowNum - encounterRange.getRow()); i++) {
-        if (allData[i][pIdColIdx].toString() == pId.toString()) count++;
+    if (existingEncId) break;
+
+    if (patientId && dateVal && patientId !== "" && dateVal !== "") {
+      let dateStr = (dateVal instanceof Date) 
+        ? Utilities.formatDate(dateVal, Session.getScriptTimeZone(), "yyyyMMdd")
+        : dateVal.toString().replace(/[^0-9]/g, "").substring(0, 8);
+
+      if (dateStr.length === 8) {
+        const allData = encounterRange.getValues();
+        const relativeRow = rowNum - encounterRange.getRow();
+        let count = 0;
+        for (let i = 0; i <= relativeRow; i++) {
+          if (allData[i][pIdColIdx].toString() == patientId.toString()) count++;
+        }
+        const sequence = count.toString().padStart(2, '0');
+        const finalId = `${dateStr}-${patientId}-${sequence}`;
+        sheet.getRange(rowNum, startCol + encIdColIdx).setValue(finalId);
+        syncToPharmacy(sheet, rowNum, startCol, headers);
+        break; 
       }
-      const finalId = `${dateStr}-${pId}-${count.toString().padStart(2, '0')}`;
-      sheet.getRange(rowNum, startCol + encIdColIdx).setValue(finalId);
-      syncToPharmacy(sheet, rowNum, startCol, headers);
-      break;
     }
     Utilities.sleep(500);
   }
 }
 
-function handlePatientIdSwap(e, headers, rowNum, startCol) {
-  const visitRange = e.source.getRangeByName("VISIT_RANGE");
-  if (!visitRange) return;
-  const vData = visitRange.getValues();
-  const vHeaders = vData[0].map(h => h.toString().trim().toUpperCase());
-  const match = vData.find(r => r[vHeaders.indexOf("PATIENT_NAME")].toString().trim() == e.value.toString().trim());
-  if (match) {
-    const pId = match[vHeaders.indexOf("PATIENT_ID")];
-    const rule = e.range.getDataValidation();
-    e.range.setDataValidation(null).setValue(pId);
-    const ageIdx = headers.indexOf("AGE");
-    if (ageIdx !== -1 && match[vHeaders.indexOf("DATE_OF_BIRTH")] instanceof Date) {
-      e.range.getSheet().getRange(rowNum, startCol + ageIdx).setValue(calculateAge(match[vHeaders.indexOf("DATE_OF_BIRTH")]));
-    }
-    if (rule) e.range.setDataValidation(rule);
-  }
-}
-
+/**
+ * Helpers
+ */
 function getFirstEmptyRowInRange(range) {
   const values = range.getValues();
   for (let i = 0; i < values.length; i++) {
@@ -309,11 +378,22 @@ function getFirstEmptyRowInRange(range) {
 function calculateAge(dob) {
   const today = new Date();
   let age = today.getFullYear() - dob.getFullYear();
-  if (today.getMonth() < dob.getMonth() || (today.getMonth() === dob.getMonth() && today.getDate() < dob.getDate())) age--;
+  const m = today.getMonth() - dob.getMonth();
+  if (m < 0 || (m === 0 && today.getDate() < dob.getDate())) age--;
   return age;
 }
 
+function getRecentVisit(data, headers, pId) {
+  const pIdx = headers.indexOf("PATIENT_ID");
+  const vIdx = headers.indexOf("VISIT_ID");
+  const matches = data.filter(r => r[pIdx].toString() == pId.toString() && r[vIdx]).map(r => r[vIdx].toString()).sort().reverse();
+  return matches.length > 0 ? matches[0] : "";
+}
+
 function isCellInNamedRange(cell, nr) {
-  if (cell.getSheet().getName() !== nr.getSheet().getName()) return false;
-  return (cell.getRow() >= nr.getRow() && cell.getRow() <= nr.getLastRow() && cell.getColumn() >= nr.getColumn() && cell.getColumn() <= nr.getLastColumn());
+  const sheetName = cell.getSheet().getName();
+  if (sheetName !== nr.getSheet().getName()) return false;
+  const r = cell.getRow();
+  const c = cell.getColumn();
+  return (r >= nr.getRow() && r <= nr.getLastRow() && c >= nr.getColumn() && c <= nr.getLastColumn());
 }
