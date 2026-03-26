@@ -11,32 +11,18 @@ function onOpen() {
 
 /**
  * Main Entry Point: Google Sheets Trigger
- * Handles both manual edits and programmatic updates from Provider Workbook.
  */
 function onEdit(e) {
-  // If e is null (e.g., triggered by a manual run), exit to avoid errors
-  if (!e) return;
-
   const range = e.range;
   const source = e.source;
-  const sheet = range.getSheet();
-  const a1 = range.getA1Notation();
-  const sheetName = sheet.getName();
-
-  // --- 1. REMOTE TRIGGER DETECTION ---
-  // If the Provider script updates cell Z1 on the Encounter sheet...
-  if (sheetName === "Encounter" && a1 === "Z1") {
-    console.log("Remote trigger detected from Provider Workbook.");
-    INITIAL_SYNC_ALL_DATA();
-    return; // Exit here; no further processing needed for the Z1 ping
-  }
-
-  // --- 2. NAMED RANGE IDENTIFICATION ---
+  
+  // Define all ranges that should trigger logic
   const activeRanges = ["LOG_PROVIDER_RANGE", "VISIT_RANGE", "ENCOUNTER_RANGE", "PHARMACY_RANGE", "PROVIDER_ENTRY_RANGE"];
   
   let activeRangeName = "";
   let activeRangeObject = null;
 
+  // Identify which named range was edited
   for (let name of activeRanges) {
     let nr = source.getRangeByName(name);
     if (nr && isCellInNamedRange(range, nr)) {
@@ -46,36 +32,33 @@ function onEdit(e) {
     }
   }
 
-  // If the edit happened outside of monitored ranges, stop
   if (!activeRangeObject) return;
 
-  // --- 3. MULTI-ROW EDIT PROCESSING ---
+  // Handle Multi-row edits (e.g., pastes)
   const startRow = range.getRow();
   const numRows = range.getNumRows();
 
   for (let i = 0; i < numRows; i++) {
     const currentRow = startRow + i;
-    // Create a 1-row range context for each row in a bulk edit/paste
     const currentRange = range.offset(i, 0, 1, range.getNumColumns());
     
     const context = getEventContext(e, currentRange, activeRangeName, activeRangeObject);
     if (!context) continue;
 
-    // A. Handle Timestamps (Date -> Time mapping)
+    // 1. Handle Automatic Timestamping
     handleTimestamping(context);
 
-    // B. Handle Encounter Logic (ID Generation & Pharmacy Sync)
+    // 2. Handle Encounter-Specific Logic
     if (context.activeRangeName === "ENCOUNTER_RANGE") {
       handleEncounterLogic(context);
     }
 
-    // C. Handle Provider Entry Registry Sync
+    // 3. Handle Provider Entry Sync Logic
     if (context.activeRangeName === "PROVIDER_ENTRY_RANGE") {
       handleProviderSync(context);
     }
   }
 }
-
 
 /**
  * Context Parser
