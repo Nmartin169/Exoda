@@ -15,6 +15,13 @@ function onOpen() {
 function onEdit(e) {
   const range = e.range;
   const source = e.source;
+  const sheet = range.getSheet();
+  
+  // If the Provider script updates cell Z1 on the Encounter sheet...
+  if (sheet.getName() === "Encounter" && range.getA1Notation() === "Z1") {
+    // Run your existing sync function
+    INITIAL_SYNC_ALL_DATA();
+  }
   
   // Define all ranges that should trigger logic
   const activeRanges = ["LOG_PROVIDER_RANGE", "VISIT_RANGE", "ENCOUNTER_RANGE", "PHARMACY_RANGE", "PROVIDER_ENTRY_RANGE"];
