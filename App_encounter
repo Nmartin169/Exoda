@@ -1,0 +1,91 @@
+/**
+ * Main Entry Point for Encounter Sheet Logic
+ */
+function handleEncounterLogic(ctx) {
+  const rowNum = ctx.range.getRow();
+
+  // 1. Patient Identification & Age Calculation
+  if (ctx.columnName === "PATIENT_ID") {
+    handlePatientIdSwap(ctx.e, ctx.headers, rowNum, ctx.startCol);
+  }
+
+  // 2. Multi-Entry Medication Logic
+  // This handles the validation for multiple drugs/categories in one cell
+  if (ctx.columnName === "MEDICATION_CATEGORY" || ctx.columnName === "DRUG_NAME") {
+    handleMultiMedicationLogic(ctx);
+  }
+
+  // 3. ID Generation (Polled)
+  pollAndGenerateEncounterId(ctx.sheet, ctx.activeRangeObject, rowNum, ctx.startCol, ctx.headers);
+
+  // 4. Pharmacy Sync Trigger
+  const pharmacyTriggers = [
+    "PATIENT_ID", "ENCOUNTER_ID", "MEDICATION_CATEGORY", "DRUG_NAME", 
+    "DOSAGE", "ROUTE", "FREQUENCY", "PHYSICIAN"
+  ];
+
+  if (pharmacyTriggers.includes(ctx.columnName)) {
+    syncToPharmacy(ctx.sheet, rowNum, ctx.startCol, ctx.headers);
+  }
+}
+
+/**
+ * Handles Multiple Entries for Categories and Drugs
+ * Reference_Sheet: Data starts Row 4, Category Col G (7), Drug Col H (8)
+ */
+function handleMultiMedicationLogic(ctx) {
+  const ss = ctx.source;
+  const refSheet = ss.getSheetByName("Reference_Sheet");
+  if (!refSheet) return;
+
+  const rowNum = ctx.range.getRow();
+  const catIdx = ctx.headers.indexOf("MEDICATION_CATEGORY");
+  const drugIdx = ctx.headers.indexOf("DRUG_NAME");
+
+  const catCell = ctx.sheet.getRange(rowNum, ctx.startCol + catIdx);
+  const drugCell = ctx.sheet.getRange(rowNum, ctx.startCol + drugIdx);
+
+  const rawCats = catCell.getValue().toString();
+  const rawDrugs = drugCell.getValue().toString();
+
+  // If Category is cleared, clear the drugs too
+  if (ctx.columnName === "MEDICATION_CATEGORY" && rawCats === "") {
+    drugCell.clearContent();
+    return;
+  }
+
+  // Parse entries (Split by comma or new line)
+  const selectedCats = rawCats.split(/,|\n/).map(s => s.trim().toUpperCase()).filter(s => s !== "");
+  const selectedDrugs = rawDrugs.split(/,|\n/).map(s => s.trim().toUpperCase()).filter(s => s !== "");
+
+  if (selectedCats.length === 0) return;
+
+  // Fetch Reference Registry (Rows 4+)
+  const lastRefRow = refSheet.getLastRow();
+  if (lastRefRow < 4) return;
+  const registry = refSheet.getRange(4, 7, lastRefRow - 3, 2).getValues();
+
+  // Validate: Ensure every drug belongs to at least one selected category
+  let invalidDrugs = [];
+  if (selectedDrugs.length > 0) {
+    invalidDrugs = selectedDrugs.filter(drug => {
+      return !registry.some(row => 
+        selectedCats.includes(row[0].toString().toUpperCase().trim()) && 
+        row[1].toString().toUpperCase().trim() === drug
+      );
+    });
+  }
+
+  // UI Feedback
+  if (invalidDrugs.length > 0) {
+    drugCell.setBackground("#F4CCCC"); // Light Red highlight
+    SpreadsheetApp.getUi().alert(
+      "⚠️ PRECRIPTION MISMATCH\n\n" +
+      "The following drugs are not listed under the selected categories:\n" + 
+      invalidDrugs.join(", ") + "\n\n" +
+      "Please verify the Medication Category or update the Drug Name."
+    );
+  } else {
+    drugCell.setBackground(null); // Reset background if valid
+  }
+}
