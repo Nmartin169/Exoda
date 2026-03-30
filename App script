@@ -97,7 +97,7 @@ function getEventContext(e, specificRange, activeRangeName, activeRangeObject) {
 function handleTimestamping(ctx) {
   if (!ctx.isTimestampZone) return;
 
-  const triggers = ["DATE_OF_VISIT", "DATE_OF_DEPARTURE", "DISPENSED_DATE"];
+  const triggers = ["DATE_OF_VISIT", "DATE_OF_DEPARTURE", "DATE"];
   
   if (triggers.includes(ctx.columnName)) {
     const targetCell = ctx.range.offset(0, 1);
@@ -123,8 +123,8 @@ function handleEncounterLogic(ctx) {
   pollAndGenerateEncounterId(ctx.sheet, ctx.activeRangeObject, rowNum, ctx.startCol, ctx.headers);
 
   const pharmacyTriggers = [
-    "PATIENT_ID", "ENCOUNTER_ID", "MEDICATION", "STRENGTH_MG_ML", 
-    "ROUTE", "DOSAGE", "FREQUENCY", "PHYSICIAN"
+    "PATIENT_ID", "ENCOUNTER_ID", "MEDICATION_CATEGORY", "DRUG_NAME", 
+    "DOSAGE", "ROUTE", "FREQUENCY", "PHYSICIAN"
   ];
 
   if (pharmacyTriggers.includes(ctx.columnName)) {
@@ -201,8 +201,8 @@ function syncToPharmacy(encounterSheet, rowNum, startCol, encounterHeaders) {
                                        .map(h => h.toString().trim().toUpperCase());
   
   const colsToMirror = [
-    "PATIENT_ID", "DATE_OF_VISIT", "TIME_OF_VISIT", "ENCOUNTER_ID", 
-    "MEDICATION", "STRENGTH_MG_ML", "ROUTE", "DOSAGE", "FREQUENCY", "PHYSICIAN"
+    "PATIENT_ID", "DATE_OF_VISIT", "TIME_OF_VISIT", "AGE", "ENCOUNTER_ID", 
+    "MEDICATION_CATEGORY", "DRUG_NAME", "DOSAGE", "ROUTE", "FREQUENCY", "PHYSICIAN"
   ];
 
   const encIdIdxEncounter = encounterHeaders.indexOf("ENCOUNTER_ID");
