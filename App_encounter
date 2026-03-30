@@ -1,91 +1,84 @@
 /**
- * Main Entry Point for Encounter Sheet Logic
+ * Main Encounter Logic
  */
 function handleEncounterLogic(ctx) {
   const rowNum = ctx.range.getRow();
 
-  // 1. Patient Identification & Age Calculation
+  // 1. Patient Lookup
   if (ctx.columnName === "PATIENT_ID") {
     handlePatientIdSwap(ctx.e, ctx.headers, rowNum, ctx.startCol);
   }
 
-  // 2. Multi-Entry Medication Logic
-  // This handles the validation for multiple drugs/categories in one cell
-  if (ctx.columnName === "MEDICATION_CATEGORY" || ctx.columnName === "DRUG_NAME") {
-    handleMultiMedicationLogic(ctx);
+  // 2. Category Selection -> Setup Dropdown for Drug Column
+  if (ctx.columnName === "MEDICATION_CATEGORY") {
+    handleMedicationDropdown(ctx);
   }
 
-  // 3. ID Generation (Polled)
+  // 3. Drug Selection -> Append to List (Multiple Entries)
+  if (ctx.columnName === "DRUG_NAME") {
+    handleMultiDrugAppend(ctx);
+  }
+
+  // 4. ID Generation & Pharmacy Sync
   pollAndGenerateEncounterId(ctx.sheet, ctx.activeRangeObject, rowNum, ctx.startCol, ctx.headers);
 
-  // 4. Pharmacy Sync Trigger
-  const pharmacyTriggers = [
-    "PATIENT_ID", "ENCOUNTER_ID", "MEDICATION_CATEGORY", "DRUG_NAME", 
-    "DOSAGE", "ROUTE", "FREQUENCY", "PHYSICIAN"
-  ];
-
+  const pharmacyTriggers = ["PATIENT_ID", "ENCOUNTER_ID", "MEDICATION_CATEGORY", "DRUG_NAME", "DOSAGE"];
   if (pharmacyTriggers.includes(ctx.columnName)) {
     syncToPharmacy(ctx.sheet, rowNum, ctx.startCol, ctx.headers);
   }
 }
 
 /**
- * Handles Multiple Entries for Categories and Drugs
- * Reference_Sheet: Data starts Row 4, Category Col G (7), Drug Col H (8)
+ * Updates the DRUG_NAME dropdown based on the category.
+ * Starts from Reference_Sheet Row 4, Columns G & H.
  */
-function handleMultiMedicationLogic(ctx) {
+function handleMedicationDropdown(ctx) {
   const ss = ctx.source;
   const refSheet = ss.getSheetByName("Reference_Sheet");
   if (!refSheet) return;
 
-  const rowNum = ctx.range.getRow();
-  const catIdx = ctx.headers.indexOf("MEDICATION_CATEGORY");
-  const drugIdx = ctx.headers.indexOf("DRUG_NAME");
+  const drugNameCell = ctx.range.offset(0, 1);
+  const selectedCategory = ctx.range.getValue();
 
-  const catCell = ctx.sheet.getRange(rowNum, ctx.startCol + catIdx);
-  const drugCell = ctx.sheet.getRange(rowNum, ctx.startCol + drugIdx);
-
-  const rawCats = catCell.getValue().toString();
-  const rawDrugs = drugCell.getValue().toString();
-
-  // If Category is cleared, clear the drugs too
-  if (ctx.columnName === "MEDICATION_CATEGORY" && rawCats === "") {
-    drugCell.clearContent();
+  if (selectedCategory === "") {
+    drugNameCell.clearDataValidations();
     return;
   }
 
-  // Parse entries (Split by comma or new line)
-  const selectedCats = rawCats.split(/,|\n/).map(s => s.trim().toUpperCase()).filter(s => s !== "");
-  const selectedDrugs = rawDrugs.split(/,|\n/).map(s => s.trim().toUpperCase()).filter(s => s !== "");
+  const startRow = 4;
+  const lastRow = refSheet.getLastRow();
+  const refData = refSheet.getRange(startRow, 7, lastRow - startRow + 1, 2).getValues();
+  
+  // Filter drugs for the specific category chosen
+  const filteredDrugs = refData
+    .filter(row => row[0].toString().trim() === selectedCategory.toString().trim())
+    .map(row => row[1])
+    .filter(name => name !== "");
 
-  if (selectedCats.length === 0) return;
-
-  // Fetch Reference Registry (Rows 4+)
-  const lastRefRow = refSheet.getLastRow();
-  if (lastRefRow < 4) return;
-  const registry = refSheet.getRange(4, 7, lastRefRow - 3, 2).getValues();
-
-  // Validate: Ensure every drug belongs to at least one selected category
-  let invalidDrugs = [];
-  if (selectedDrugs.length > 0) {
-    invalidDrugs = selectedDrugs.filter(drug => {
-      return !registry.some(row => 
-        selectedCats.includes(row[0].toString().toUpperCase().trim()) && 
-        row[1].toString().toUpperCase().trim() === drug
-      );
-    });
+  if (filteredDrugs.length > 0) {
+    const rule = SpreadsheetApp.newDataValidation()
+      .requireValueInList(filteredDrugs)
+      .setAllowInvalid(true) // Set to true so the "list" of drugs doesn't trigger an error
+      .build();
+    drugNameCell.setDataValidation(rule);
   }
+}
 
-  // UI Feedback
-  if (invalidDrugs.length > 0) {
-    drugCell.setBackground("#F4CCCC"); // Light Red highlight
-    SpreadsheetApp.getUi().alert(
-      "⚠️ PRECRIPTION MISMATCH\n\n" +
-      "The following drugs are not listed under the selected categories:\n" + 
-      invalidDrugs.join(", ") + "\n\n" +
-      "Please verify the Medication Category or update the Drug Name."
-    );
-  } else {
-    drugCell.setBackground(null); // Reset background if valid
+/**
+ * Appends the newly selected drug to the existing string in the cell.
+ */
+function handleMultiDrugAppend(ctx) {
+  const oldValue = ctx.e.oldValue;
+  const newValue = ctx.e.value;
+
+  // If there was already a value and it's not a duplicate, append it
+  if (oldValue && newValue && oldValue !== newValue) {
+    const items = oldValue.split(",").map(i => i.trim());
+    
+    // Prevent adding the same drug twice in one cell
+    if (!items.includes(newValue)) {
+      const combinedValue = oldValue + ", " + newValue;
+      ctx.range.setValue(combinedValue);
+    }
   }
 }
