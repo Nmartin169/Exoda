@@ -1,4 +1,207 @@
 /**
+ * Creates a custom menu when the spreadsheet opens.
+ */
+function onOpen() {
+  const ui = SpreadsheetApp.getUi();
+  ui.createMenu('🏥 EHR System')
+      .addItem('Refresh Pharmacy (Maintain Status)', 'INITIAL_SYNC_ALL_DATA')
+      .addItem('Sync Provider Registry (Bulk)', 'SYNC_PROVIDER_REGISTRY_BULK')
+      .addToUi();
+}
+
+/**
+ * Main Entry Point: Google Sheets Trigger
+ */
+function onEdit(e) {
+  const range = e.range;
+  const source = e.source;
+  
+  // Define all ranges that should trigger logic
+  const activeRanges = ["LOG_PROVIDER_RANGE", "VISIT_RANGE", "ENCOUNTER_RANGE", "PHARMACY_RANGE", "PROVIDER_ENTRY_RANGE"];
+  
+  let activeRangeName = "";
+  let activeRangeObject = null;
+
+  // Identify which named range was edited
+  for (let name of activeRanges) {
+    let nr = source.getRangeByName(name);
+    if (nr && isCellInNamedRange(range, nr)) {
+      activeRangeName = name;
+      activeRangeObject = nr;
+      break;
+    }
+  }
+
+  if (!activeRangeObject) return;
+
+  // Handle Multi-row edits (e.g., pastes)
+  const startRow = range.getRow();
+  const numRows = range.getNumRows();
+
+  for (let i = 0; i < numRows; i++) {
+    const currentRow = startRow + i;
+    const currentRange = range.offset(i, 0, 1, range.getNumColumns());
+    
+    const context = getEventContext(e, currentRange, activeRangeName, activeRangeObject);
+    if (!context) continue;
+
+    // 1. Handle Automatic Timestamping
+    handleTimestamping(context);
+
+    // 2. Handle Encounter-Specific Logic
+    if (context.activeRangeName === "ENCOUNTER_RANGE") {
+      handleEncounterLogic(context);
+    }
+
+    // 3. Handle Provider Entry Sync Logic
+    if (context.activeRangeName === "PROVIDER_ENTRY_RANGE") {
+      handleProviderSync(context);
+    }
+  }
+}
+
+/**
+ * Context Parser
+ */
+function getEventContext(e, specificRange, activeRangeName, activeRangeObject) {
+  const sheet = specificRange.getSheet();
+  const source = e.source;
+  const startRow = activeRangeObject.getRow();
+  const startCol = activeRangeObject.getColumn();
+  
+  const headers = sheet.getRange(startRow, startCol, 1, activeRangeObject.getWidth()).getValues()[0]
+                       .map(h => h.toString().trim().toUpperCase());
+  
+  const colIndex = specificRange.getColumn() - startCol;
+  const columnName = headers[colIndex] || "";
+
+  const timestampRanges = ["LOG_PROVIDER_RANGE", "VISIT_RANGE", "ENCOUNTER_RANGE", "PHARMACY_RANGE", "PROVIDER_ENTRY_RANGE"];
+
+  return {
+    e, 
+    range: specificRange, 
+    sheet, 
+    source,
+    activeRangeName, 
+    activeRangeObject,
+    columnName, 
+    headers, 
+    startCol,
+    isTimestampZone: timestampRanges.includes(activeRangeName)
+  };
+}
+
+/**
+ * Automatic Timestamping
+ */
+function handleTimestamping(ctx) {
+  if (!ctx.isTimestampZone) return;
+
+  const triggers = ["DATE_OF_VISIT", "DATE_OF_DEPARTURE", "DATE"];
+  
+  if (triggers.includes(ctx.columnName)) {
+    const targetCell = ctx.range.offset(0, 1);
+    const val = ctx.range.getValue();
+    if (val === "") {
+      targetCell.clearContent();
+    } else {
+      targetCell.setValue(new Date());
+    }
+  }
+}
+
+
+/**
+ * Main Encounter Logic
+ */
+function handleEncounterLogic(ctx) {
+  const rowNum = ctx.range.getRow();
+
+  if (ctx.columnName === "PATIENT_ID") {
+    handlePatientIdSwap(ctx.e, ctx.headers, rowNum, ctx.startCol);
+  }
+
+  // 1. Category logic: Prioritize the LAST category for the dropdown
+  if (ctx.columnName === "MEDICATION_CATEGORY") {
+    handleMultiCategoryDropdown(ctx);
+  }
+
+  // 2. Drug logic: Append new selection to existing list
+  if (ctx.columnName === "DRUG_NAME") {
+    handleMultiDrugAppend(ctx);
+  }
+
+  // 3. Dosage logic: Allow repeating values
+  if (ctx.columnName === "DOSAGE") {
+    handleMultiDosageAppend(ctx); // Allows 1, 1, 1...
+  }
+
+  pollAndGenerateEncounterId(ctx.sheet, ctx.activeRangeObject, rowNum, ctx.startCol, ctx.headers);
+
+  const pharmacyTriggers = ["ENCOUNTER_ID", "OUTCOME", "PHYSICIAN"];
+  if (pharmacyTriggers.includes(ctx.columnName)) {
+    syncToPharmacy(ctx.sheet, rowNum, ctx.startCol, ctx.headers);
+  }
+}
+
+/**
+ * Parses the Category cell and sets the Drug dropdown based on the LAST item.
+ */
+function handleMultiCategoryDropdown(ctx) {
+  const ss = ctx.source;
+  const refSheet = ss.getSheetByName("Reference_Sheet");
+  if (!refSheet) return;
+
+  const rawValue = ctx.range.getValue().toString();
+  if (!rawValue) return;
+
+  // Split by comma and get the last entry (e.g., "Analgesics, Antibiotics" -> "Antibiotics")
+  const categoryList = rawValue.split(",").map(item => item.trim());
+  const lastCategory = categoryList[categoryList.length - 1];
+
+  const drugNameCell = ctx.range.offset(0, 1);
+  const startRow = 4;
+  const lastRow = refSheet.getLastRow();
+  
+  if (lastRow < startRow) return;
+
+  const refData = refSheet.getRange(startRow, 7, lastRow - startRow + 1, 2).getValues();
+  
+  // Filter drugs based on that LAST category
+  const filteredDrugs = refData
+    .filter(row => row[0].toString().trim().toUpperCase() === lastCategory.toUpperCase())
+    .map(row => row[1])
+    .filter(name => name !== "");
+
+  if (filteredDrugs.length > 0) {
+    const rule = SpreadsheetApp.newDataValidation()
+      .requireValueInList(filteredDrugs)
+      .setAllowInvalid(true) // Allows the cell to hold the combined string later
+      .build();
+    drugNameCell.setDataValidation(rule);
+  }
+}
+
+/**
+ * Handles appending the drug name so we don't overwrite previous prescriptions.
+ */
+function handleMultiDrugAppend(ctx) {
+  const e = ctx.e;
+  const newValue = e.value;
+  const oldValue = e.oldValue;
+
+  // If we are adding a new drug to an existing list
+  if (oldValue && newValue && oldValue.indexOf(newValue) === -1) {
+    // Check if the user is just replacing the whole cell or appending
+    // If the newValue is already a list (paste), don't loop-append
+    if (newValue.includes(",")) return;
+
+    const combinedValue = oldValue + ", " + newValue;
+    ctx.range.setValue(combinedValue);
+  }
+}
+
+/**
  * Handles the DOSAGE column to allow repeating values (e.g., 1, 1, 1).
  */
 function handleMultiDosageAppend(ctx) {
@@ -13,4 +216,291 @@ function handleMultiDosageAppend(ctx) {
   // This bypasses the "no-change" restriction of standard dropdowns
   const combinedValue = oldValue + ", " + newValue;
   ctx.range.setValue(combinedValue);
+}
+
+
+/**
+ * Provider Sync Logic: Maps Entry to Registry
+ */
+function handleProviderSync(ctx) {
+  const ss = ctx.source;
+  const targetRange = ss.getRangeByName("PROVIDER_RANGE");
+  if (!targetRange) return;
+
+  const targetSheet = targetRange.getSheet();
+  const tStartRow = targetRange.getRow();
+  const tStartCol = targetRange.getColumn();
+  const targetHeaders = targetSheet.getRange(tStartRow, tStartCol, 1, targetRange.getWidth()).getValues()[0]
+                                   .map(h => h.toString().trim().toUpperCase());
+
+  // Mapping: "SOURCE_COLUMN_NAME": "DESTINATION_COLUMN_NAME"
+  const mapping = {
+    "PROVIDER NAME": "PROVIDER_NAME",
+    "DATE OF BIRTH": "DATE_OF_BIRTH",
+    "GENDER": "GENDER",
+    "DESIGNATION": "DESIGNATION",
+    "MEMBERSHIP STATUS": "MEMBERSHIP_STATUS"
+  };
+
+  const rowNum = ctx.range.getRow();
+  const providerNameIdx = ctx.headers.indexOf("PROVIDER NAME");
+  if (providerNameIdx === -1) return;
+  
+  const providerName = ctx.sheet.getRange(rowNum, ctx.startCol + providerNameIdx).getValue();
+  if (!providerName || providerName === "") return;
+
+  // Check for existing record to update
+  const targetData = targetRange.getValues();
+  const nameColIdx = targetHeaders.indexOf("PROVIDER_NAME");
+  let targetRow = -1;
+
+  for (let i = 1; i < targetData.length; i++) {
+    if (targetData[i][nameColIdx].toString().trim().toUpperCase() === providerName.toString().trim().toUpperCase()) {
+      targetRow = tStartRow + i;
+      break;
+    }
+  }
+
+  const writeRow = (targetRow !== -1) ? targetRow : getFirstEmptyRowInRange(targetRange);
+
+  for (let entryHead in mapping) {
+    const srcIdx = ctx.headers.indexOf(entryHead);
+    const destIdx = targetHeaders.indexOf(mapping[entryHead]);
+
+    if (srcIdx !== -1 && destIdx !== -1) {
+      const value = ctx.sheet.getRange(rowNum, ctx.startCol + srcIdx).getValue();
+      targetSheet.getRange(writeRow, tStartCol + destIdx).setValue(value);
+    }
+  }
+}
+
+/**
+ * Pharmacy Sync: Updates existing or appends new
+ */
+function syncToPharmacy(encounterSheet, rowNum, startCol, encounterHeaders) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const pharmacyRange = ss.getRangeByName("PHARMACY_RANGE");
+  if (!pharmacyRange) return;
+
+  const pharmacySheet = pharmacyRange.getSheet();
+  const pStartRow = pharmacyRange.getRow();
+  const pStartCol = pharmacyRange.getColumn();
+  const pharmacyHeaders = pharmacySheet.getRange(pStartRow, pStartCol, 1, pharmacyRange.getWidth()).getValues()[0]
+                                       .map(h => h.toString().trim().toUpperCase());
+  
+  const colsToMirror = [
+    "PATIENT_ID", "DATE_OF_VISIT", "TIME_OF_VISIT", "AGE", "SERVICE_TYPE", "ENCOUNTER_ID", 
+    "MEDICATION_CATEGORY", "DRUG_NAME", "DOSAGE", "ROUTE", "FREQUENCY", "PHYSICIAN"
+  ];
+
+  const encIdIdxEncounter = encounterHeaders.indexOf("ENCOUNTER_ID");
+  const encounterId = encounterSheet.getRange(rowNum, startCol + encIdIdxEncounter).getValue();
+
+  if (!encounterId) return;
+
+  const pEncIdIdx = pharmacyHeaders.indexOf("ENCOUNTER_ID");
+  const pharmacyData = pharmacyRange.getValues();
+  let targetRow = -1;
+  
+  if (pEncIdIdx !== -1) {
+    for (let i = 1; i < pharmacyData.length; i++) {
+      if (pharmacyData[i][pEncIdIdx] === encounterId) {
+        targetRow = pStartRow + i; 
+        break;
+      }
+    }
+  }
+
+  const writeRow = (targetRow !== -1) ? targetRow : getFirstEmptyRowInRange(pharmacyRange);
+
+  colsToMirror.forEach(colName => {
+    const srcIdx = encounterHeaders.indexOf(colName);
+    const destIdx = pharmacyHeaders.indexOf(colName);
+    if (srcIdx !== -1 && destIdx !== -1) {
+      const value = encounterSheet.getRange(rowNum, startCol + srcIdx).getValue();
+      pharmacySheet.getRange(writeRow, pStartCol + destIdx).setValue(value);
+    }
+  });
+}
+
+/**
+ * Bulk Pharmacy Sync
+ */
+function INITIAL_SYNC_ALL_DATA() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const encounterRange = ss.getRangeByName("ENCOUNTER_RANGE");
+  if (!encounterRange) return;
+
+  const encounterSheet = encounterRange.getSheet();
+  const encounterData = encounterRange.getValues();
+  const encounterHeaders = encounterData[0].map(h => h.toString().trim().toUpperCase());
+  
+  let syncCount = 0;
+  for (let i = 1; i < encounterData.length; i++) {
+    const encId = encounterData[i][encounterHeaders.indexOf("ENCOUNTER_ID")];
+    if (encId && encId !== "") {
+      syncToPharmacy(encounterSheet, encounterRange.getRow() + i, encounterRange.getColumn(), encounterHeaders);
+      syncCount++;
+    }
+  }
+  SpreadsheetApp.getUi().alert('Pharmacy updated. ' + syncCount + ' records processed.');
+}
+
+/**
+ * Bulk Provider Sync
+ */
+function SYNC_PROVIDER_REGISTRY_BULK() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const entryRange = ss.getRangeByName("PROVIDER_ENTRY_RANGE");
+  if (!entryRange) return;
+
+  const sheet = entryRange.getSheet();
+  const data = entryRange.getValues();
+  const headers = data[0].map(h => h.toString().trim().toUpperCase());
+
+  let count = 0;
+  for (let i = 1; i < data.length; i++) {
+    if (data[i][headers.indexOf("PROVIDER NAME")] !== "") {
+      const ctx = {
+        source: ss,
+        sheet: sheet,
+        range: entryRange.offset(i, 0, 1, 1),
+        headers: headers,
+        startCol: entryRange.getColumn()
+      };
+      handleProviderSync(ctx);
+      count++;
+    }
+  }
+  SpreadsheetApp.getUi().alert('Sync Complete: ' + count + ' provider records processed.');
+}
+
+/**
+ * Patient ID Swap Logic
+ */
+function handlePatientIdSwap(e, headers, rowNum, startCol) {
+  const source = e.source;
+  const visitRange = source.getRangeByName("VISIT_RANGE");
+  if (!visitRange) return;
+
+  const vData = visitRange.getValues();
+  const vHeaders = vData[0].map(h => h.toString().trim().toUpperCase());
+  const nameIdx = vHeaders.indexOf("PATIENT_NAME");
+  const idIdx = vHeaders.indexOf("PATIENT_ID");
+  const dobIdx = vHeaders.indexOf("DATE_OF_BIRTH");
+
+  const match = vData.find(r => r[nameIdx].toString().trim() == e.value.toString().trim());
+  if (match) {
+    const pId = match[idIdx];
+    const rule = e.range.getDataValidation();
+    e.range.setDataValidation(null);
+    e.range.setValue(pId);
+    
+    const ageColIdx = headers.indexOf("AGE");
+    if (ageColIdx !== -1 && match[dobIdx] instanceof Date) {
+      e.range.getSheet().getRange(rowNum, startCol + ageColIdx).setValue(calculateAge(match[dobIdx]));
+    }
+
+    const vIdColIdx = headers.indexOf("VISIT_ID");
+    if (vIdColIdx !== -1) {
+      e.range.getSheet().getRange(rowNum, startCol + vIdColIdx).setValue(getRecentVisit(vData, vHeaders, pId));
+    }
+
+    const sTypeColIdx = headers.indexOf("SERVICE_TYPE");
+    if (sTypeColIdx !== -1) {
+      sheet.getRange(rowNum, startCol + sTypeColIdx).setValue(getServiceType(vData, vHeaders, pId));
+    }
+
+    SpreadsheetApp.flush();
+    if (rule) e.range.setDataValidation(rule);
+  }
+}
+
+/**
+ * Encounter ID Generation
+ */
+function pollAndGenerateEncounterId(sheet, encounterRange, rowNum, startCol, headers) {
+  const pIdColIdx = headers.indexOf("PATIENT_ID");
+  const dVisColIdx = headers.indexOf("DATE_OF_VISIT");
+  const encIdColIdx = headers.indexOf("ENCOUNTER_ID");
+
+  if (pIdColIdx === -1 || dVisColIdx === -1 || encIdColIdx === -1) return;
+
+  for (let attempt = 0; attempt < 3; attempt++) {
+    SpreadsheetApp.flush(); 
+    let patientId = sheet.getRange(rowNum, startCol + pIdColIdx).getValue();
+    let dateVal = sheet.getRange(rowNum, startCol + dVisColIdx).getValue();
+    let existingEncId = sheet.getRange(rowNum, startCol + encIdColIdx).getValue();
+
+    if (existingEncId) break;
+
+    if (patientId && dateVal && patientId !== "" && dateVal !== "") {
+      let dateStr = (dateVal instanceof Date) 
+        ? Utilities.formatDate(dateVal, Session.getScriptTimeZone(), "yyyyMMdd")
+        : dateVal.toString().replace(/[^0-9]/g, "").substring(0, 8);
+
+      if (dateStr.length === 8) {
+        const allData = encounterRange.getValues();
+        const relativeRow = rowNum - encounterRange.getRow();
+        let count = 0;
+        for (let i = 0; i <= relativeRow; i++) {
+          if (allData[i][pIdColIdx].toString() == patientId.toString()) count++;
+        }
+        const sequence = count.toString().padStart(2, '0');
+        const finalId = `${dateStr}-${patientId}-${sequence}`;
+        sheet.getRange(rowNum, startCol + encIdColIdx).setValue(finalId);
+        syncToPharmacy(sheet, rowNum, startCol, headers);
+        break; 
+      }
+    }
+    Utilities.sleep(500);
+  }
+}
+
+/**
+ * Helpers
+ */
+function getFirstEmptyRowInRange(range) {
+  const values = range.getValues();
+  for (let i = 0; i < values.length; i++) {
+    if (values[i].join("").trim() === "") return range.getRow() + i;
+  }
+  return range.getLastRow() + 1;
+}
+
+function calculateAge(dob) {
+  const today = new Date();
+  let age = today.getFullYear() - dob.getFullYear();
+  const m = today.getMonth() - dob.getMonth();
+  if (m < 0 || (m === 0 && today.getDate() < dob.getDate())) age--;
+  return age;
+}
+
+function getRecentVisit(data, headers, pId) {
+  const pIdx = headers.indexOf("PATIENT_ID");
+  const vIdx = headers.indexOf("VISIT_ID");
+  const matches = data.filter(r => r[pIdx].toString() == pId.toString() && r[vIdx]).map(r => r[vIdx].toString()).sort().reverse();
+  return matches.length > 0 ? matches[0] : "";
+}
+
+function getServiceType(data, headers, pId) {
+  const pIdx = headers.indexOf("PATIENT_ID");
+  const sIdx = headers.indexOf("SERVICE_TYPE");
+  
+  if (pIdx === -1 || sIdx === -1) return "";
+
+  // Find the most recent entry for this Patient ID in the Visit Data
+  // Reversing the search to get the latest visit's service type
+  const matches = data.filter(r => r[pIdx].toString() === pId.toString() && r[sIdx]);
+  return matches.length > 0 ? matches[matches.length - 1][sIdx] : "";
+}
+
+
+
+function isCellInNamedRange(cell, nr) {
+  const sheetName = cell.getSheet().getName();
+  if (sheetName !== nr.getSheet().getName()) return false;
+  const r = cell.getRow();
+  const c = cell.getColumn();
+  return (r >= nr.getRow() && r <= nr.getLastRow() && c >= nr.getColumn() && c <= nr.getLastColumn());
 }
