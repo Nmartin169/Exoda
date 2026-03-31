@@ -1,84 +1,16 @@
 /**
- * Main Encounter Logic
+ * Handles the DOSAGE column to allow repeating values (e.g., 1, 1, 1).
  */
-function handleEncounterLogic(ctx) {
-  const rowNum = ctx.range.getRow();
-
-  if (ctx.columnName === "PATIENT_ID") {
-    handlePatientIdSwap(ctx.e, ctx.headers, rowNum, ctx.startCol);
-  }
-
-  // 1. Category logic: Prioritize the LAST category for the dropdown
-  if (ctx.columnName === "MEDICATION_CATEGORY") {
-    handleMultiCategoryDropdown(ctx);
-  }
-
-  // 2. Drug logic: Append new selection to existing list
-  if (ctx.columnName === "DRUG_NAME") {
-    handleMultiDrugAppend(ctx);
-  }
-
-  pollAndGenerateEncounterId(ctx.sheet, ctx.activeRangeObject, rowNum, ctx.startCol, ctx.headers);
-
-  const pharmacyTriggers = ["PATIENT_ID", "ENCOUNTER_ID", "MEDICATION_CATEGORY", "DRUG_NAME", "DOSAGE"];
-  if (pharmacyTriggers.includes(ctx.columnName)) {
-    syncToPharmacy(ctx.sheet, rowNum, ctx.startCol, ctx.headers);
-  }
-}
-
-/**
- * Parses the Category cell and sets the Drug dropdown based on the LAST item.
- */
-function handleMultiCategoryDropdown(ctx) {
-  const ss = ctx.source;
-  const refSheet = ss.getSheetByName("Reference_Sheet");
-  if (!refSheet) return;
-
-  const rawValue = ctx.range.getValue().toString();
-  if (!rawValue) return;
-
-  // Split by comma and get the last entry (e.g., "Analgesics, Antibiotics" -> "Antibiotics")
-  const categoryList = rawValue.split(",").map(item => item.trim());
-  const lastCategory = categoryList[categoryList.length - 1];
-
-  const drugNameCell = ctx.range.offset(0, 1);
-  const startRow = 4;
-  const lastRow = refSheet.getLastRow();
-  
-  if (lastRow < startRow) return;
-
-  const refData = refSheet.getRange(startRow, 7, lastRow - startRow + 1, 2).getValues();
-  
-  // Filter drugs based on that LAST category
-  const filteredDrugs = refData
-    .filter(row => row[0].toString().trim().toUpperCase() === lastCategory.toUpperCase())
-    .map(row => row[1])
-    .filter(name => name !== "");
-
-  if (filteredDrugs.length > 0) {
-    const rule = SpreadsheetApp.newDataValidation()
-      .requireValueInList(filteredDrugs)
-      .setAllowInvalid(true) // Allows the cell to hold the combined string later
-      .build();
-    drugNameCell.setDataValidation(rule);
-  }
-}
-
-/**
- * Handles appending the drug name so we don't overwrite previous prescriptions.
- */
-function handleMultiDrugAppend(ctx) {
+function handleMultiDosageAppend(ctx) {
   const e = ctx.e;
   const newValue = e.value;
   const oldValue = e.oldValue;
 
-  // If we are adding a new drug to an existing list
-  if (oldValue && newValue && oldValue.indexOf(newValue) === -1) {
-    // Check if the user is just replacing the whole cell or appending
-    // If the newValue is already a list (paste), don't loop-append
-    if (newValue.includes(",")) return;
+  // If the cell was empty or user is clearing it, do nothing
+  if (!oldValue || !newValue) return;
 
-    const combinedValue = oldValue + ", " + newValue;
-    ctx.range.setValue(combinedValue);
-  }
+  // Append the new dosage to the existing string
+  // This bypasses the "no-change" restriction of standard dropdowns
+  const combinedValue = oldValue + ", " + newValue;
+  ctx.range.setValue(combinedValue);
 }
