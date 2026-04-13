@@ -1,237 +1,238 @@
+
 /**
- * EHR FRONT DESK WORKBOOK - FULL INTEGRATED VERSION
- * Handles: Patient Registry, Visit In/Out, and Provider In/Out.
- * By Ikenna M. D. Nwankwo
- */
+ * EHR FRONT DESK WORKBOOK - FULL INTEGRATED VERSION
+ * Handles: Patient Registry, Visit In/Out, and Provider In/Out.
+ * By Ikenna M. D. Nwankwo
+ */
 
 // --- CONFIGURATION ---
 const MASTER_ID = "1Su8LqmUv3pQwpdKCJUJ8KW2cve7Dac9CxVoUR1d78HQ";
 
 /**
- * GLOBAL LOCK WRAPPER (The Bouncer)
- * Ensures only one submission processes at a time to prevent data collisions.
- */
+ * GLOBAL LOCK WRAPPER (The Bouncer)
+ * Ensures only one submission processes at a time to prevent data collisions.
+ */
 /**
- * IMPROVED GLOBAL LOCK WRAPPER
- */
+ * IMPROVED GLOBAL LOCK WRAPPER
+ */
 function safeExecute(task) {
-  // Use DocumentLock instead of ScriptLock for better reliability in shared sheets
-  const lock = LockService.getDocumentLock(); 
-  const timeoutMs = 30000; // 30 seconds
-  
-  try {
-    // Attempt to acquire the lock
-    const hasLock = lock.tryLock(timeoutMs);
-    
-    if (!hasLock) {
-      console.error("Lock timeout: Another user is currently submitting data.");
-      SpreadsheetApp.getUi().alert("System Busy: Another submission is in progress. Please wait 10 seconds and try again.");
-      return;
-    }
+  // Use DocumentLock instead of ScriptLock for better reliability in shared sheets
+  const lock = LockService.getDocumentLock(); 
+  const timeoutMs = 30000; // 30 seconds
+  
+  try {
+    // Attempt to acquire the lock
+    const hasLock = lock.tryLock(timeoutMs);
+    
+    if (!hasLock) {
+      console.error("Lock timeout: Another user is currently submitting data.");
+      SpreadsheetApp.getUi().alert("System Busy: Another submission is in progress. Please wait 10 seconds and try again.");
+      return;
+    }
 
-    // Execute the task
-    task();
-    
-    // Ensure all changes are committed before releasing lock
-    SpreadsheetApp.flush(); 
-    
-  } catch (e) {
-    console.error("Execution Error: " + e.toString());
-    SpreadsheetApp.getUi().alert("Execution Error: " + e.message);
-  } finally {
-    // Always release the lock, even if an error occurs
-    lock.releaseLock();
-  }
+    // Execute the task
+    task();
+    
+    // Ensure all changes are committed before releasing lock
+    SpreadsheetApp.flush(); 
+    
+  } catch (e) {
+    console.error("Execution Error: " + e.toString());
+    SpreadsheetApp.getUi().alert("Execution Error: " + e.message);
+  } finally {
+    // Always release the lock, even if an error occurs
+    lock.releaseLock();
+  }
 }
 
 // --- CORE LOGIC FUNCTIONS ---
 
 /**
- * Adds new patient to the Patient_Registry tab.
- * Targeted Clear: Clears all input cells in the range.
- */
+ * Adds new patient to the Patient_Registry tab.
+ * Targeted Clear: Clears all input cells in the range.
+ */
 function corePatient(i) {
-  safeExecute(() => {
-    const ss = SpreadsheetApp.getActiveSpreadsheet();
-    const range = ss.getRangeByName("PATIENT_ENTRY_RANGE_" + i);
-    if (!range) return;
-    
-    const vals = range.getValues()[0]; 
-    const masterSs = SpreadsheetApp.openById(MASTER_ID);
-    const masterSheet = masterSs.getSheetByName("Patient_Registry");
-    
-    // Find next row, ensuring we start after the Triple Header (Row 4)
-    const lastRow = masterSheet.getLastRow();
-    const nextRow = (lastRow < 3) ? 4 : lastRow + 1;
+  safeExecute(() => {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const range = ss.getRangeByName("PATIENT_ENTRY_RANGE_" + i);
+    if (!range) return;
+    
+    const vals = range.getValues()[0]; 
+    const masterSs = SpreadsheetApp.openById(MASTER_ID);
+    const masterSheet = masterSs.getSheetByName("Patient_Registry");
+    
+    // Find next row, ensuring we start after the Triple Header (Row 4)
+    const lastRow = masterSheet.getLastRow();
+    const nextRow = (lastRow < 3) ? 4 : lastRow + 1;
 
-    // Push: [Name, ID, DOB]
-    masterSheet.getRange(nextRow, 1, 1, 3).setValues([[vals[0], vals[1], vals[2]]]);
-    
-    range.clearContent(); 
-    SpreadsheetApp.getUi().alert("Patient " + i + " Registered.");
-  });
+    // Push: [Name, ID, DOB]
+    masterSheet.getRange(nextRow, 1, 1, 3).setValues([[vals[0], vals[1], vals[2]]]);
+    
+    range.clearContent(); 
+    SpreadsheetApp.getUi().alert("Patient " + i + " Registered.");
+  });
 }
 
 /**
- * Logs a "Visit In" to the Master Visit tab.
- * Targeted Clear: Name (1), Visit Date (3), Service (4). 
- * Leaves Patient ID (2) formula intact.
- */
+ * Logs a "Visit In" to the Master Visit tab.
+ * Targeted Clear: Name (1), Visit Date (3), Service (4). 
+ * Leaves Patient ID (2) formula intact.
+ */
 function coreVisitIn(i) {
-  safeExecute(() => {
-    const ss = SpreadsheetApp.getActiveSpreadsheet();
-    const range = ss.getRangeByName("VISIT_IN_ENTRY_" + i);
-    if (!range) return;
-    
-    const vals = range.getValues()[0];
-    const masterSs = SpreadsheetApp.openById(MASTER_ID);
-    const masterSheet = masterSs.getSheetByName("Visit");
-    
-    const nextRow = masterSheet.getLastRow() + 1;
-    
-    // Master Structure: [Name, PatientID, VisitDate, TimestampIn, ServiceType]
-    const rowData = [[vals[0], vals[1], vals[2], new Date(), vals[3]]];
-    masterSheet.getRange(nextRow, 1, 1, 5).setValues(rowData);
-    
-    // Aligned Targeted Clear
-    [1, 3, 4].forEach(colIdx => range.getCell(1, colIdx).clearContent());
-    
-    SpreadsheetApp.getUi().alert("Visit In " + i + " Logged.");
-  });
+  safeExecute(() => {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const range = ss.getRangeByName("VISIT_IN_ENTRY_" + i);
+    if (!range) return;
+    
+    const vals = range.getValues()[0];
+    const masterSs = SpreadsheetApp.openById(MASTER_ID);
+    const masterSheet = masterSs.getSheetByName("Visit");
+    
+    const nextRow = masterSheet.getLastRow() + 1;
+    
+    // Master Structure: [Name, PatientID, VisitDate, TimestampIn, ServiceType]
+    const rowData = [[vals[0], vals[1], vals[2], new Date(), vals[3]]];
+    masterSheet.getRange(nextRow, 1, 1, 5).setValues(rowData);
+    
+    // Aligned Targeted Clear
+    [1, 3, 4].forEach(colIdx => range.getCell(1, colIdx).clearContent());
+    
+    SpreadsheetApp.getUi().alert("Visit In " + i + " Logged.");
+  });
 }
 
 /**
- * Logs "Visit Out" by searching for the Visit ID in the Master.
- * Targeted Clear: Search Name (1), Departure Date (4).
- */
+ * Logs "Visit Out" by searching for the Visit ID in the Master.
+ * Targeted Clear: Search Name (1), Departure Date (4).
+ */
 function coreVisitOut(i) {
-  safeExecute(() => {
-    const ss = SpreadsheetApp.getActiveSpreadsheet();
-    const range = ss.getRangeByName("VISIT_OUT_ENTRY_" + i);
-    if (!range) return;
-    
-    const vals = range.getValues()[0];
-    const visitId = vals[2]; // Column 3 in local range
-    const masterSs = SpreadsheetApp.openById(MASTER_ID);
-    const masterSheet = masterSs.getSheetByName("Visit");
-    
-    // Search Column H (8) of Master for Visit ID
-    const lastRow = masterSheet.getLastRow();
-    const idData = masterSheet.getRange(1, 8, lastRow).getValues().flat();
-    const targetRow = idData.indexOf(visitId) + 1;
-    
-    if (targetRow > 0) {
-      // Update Master Departure Date (Col 9) and Timestamp (Col 10)
-      masterSheet.getRange(targetRow, 9, 1, 2).setValues([[vals[3], new Date()]]);
-      
-      // Aligned Targeted Clear
-      [1, 4].forEach(colIdx => range.getCell(1, colIdx).clearContent());
-      
-      SpreadsheetApp.getUi().alert("Visit Out " + i + " Recorded.");
-    } else {
-      SpreadsheetApp.getUi().alert("Error: Visit ID " + visitId + " not found in Master.");
-    }
-  });
+  safeExecute(() => {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const range = ss.getRangeByName("VISIT_OUT_ENTRY_" + i);
+    if (!range) return;
+    
+    const vals = range.getValues()[0];
+    const visitId = vals[2]; // Column 3 in local range
+    const masterSs = SpreadsheetApp.openById(MASTER_ID);
+    const masterSheet = masterSs.getSheetByName("Visit");
+    
+    // Search Column H (8) of Master for Visit ID
+    const lastRow = masterSheet.getLastRow();
+    const idData = masterSheet.getRange(1, 8, lastRow).getValues().flat();
+    const targetRow = idData.indexOf(visitId) + 1;
+    
+    if (targetRow > 0) {
+      // Update Master Departure Date (Col 9) and Timestamp (Col 10)
+      masterSheet.getRange(targetRow, 9, 1, 2).setValues([[vals[3], new Date()]]);
+      
+      // Aligned Targeted Clear
+      [1, 4].forEach(colIdx => range.getCell(1, colIdx).clearContent());
+      
+      SpreadsheetApp.getUi().alert("Visit Out " + i + " Recorded.");
+    } else {
+      SpreadsheetApp.getUi().alert("Error: Visit ID " + visitId + " not found in Master.");
+    }
+  });
 }
 
 /**
- * Provider Login.
- * Targeted Clear: Name (1), Date (3), Service (4).
- */
+ * Provider Login.
+ * Targeted Clear: Name (1), Date (3), Service (4).
+ */
 function coreProvIn(i) {
-  safeExecute(() => {
-    const ss = SpreadsheetApp.getActiveSpreadsheet();
-    const range = ss.getRangeByName("LOG_PROVIDER_IN_ENTRY_" + i);
-    if (!range) return;
-    
-    const vals = range.getValues()[0];
-    const masterSs = SpreadsheetApp.openById(MASTER_ID);
-    const masterSheet = masterSs.getSheetByName("Log_Provider");
-    
-    // Master Structure: [Name, ID, Date, TimestampIn, Service]
-    masterSheet.getRange(masterSheet.getLastRow() + 1, 1, 1, 5).setValues([[vals[0], vals[1], vals[2], new Date(), vals[3]]]);
-    
-    [1, 3, 4].forEach(colIdx => range.getCell(1, colIdx).clearContent());
-    SpreadsheetApp.getUi().alert("Provider In " + i + " Logged.");
-  });
+  safeExecute(() => {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const range = ss.getRangeByName("LOG_PROVIDER_IN_ENTRY_" + i);
+    if (!range) return;
+    
+    const vals = range.getValues()[0];
+    const masterSs = SpreadsheetApp.openById(MASTER_ID);
+    const masterSheet = masterSs.getSheetByName("Log_Provider");
+    
+    // Master Structure: [Name, ID, Date, TimestampIn, Service]
+    masterSheet.getRange(masterSheet.getLastRow() + 1, 1, 1, 5).setValues([[vals[0], vals[1], vals[2], new Date(), vals[3]]]);
+    
+    [1, 3, 4].forEach(colIdx => range.getCell(1, colIdx).clearContent());
+    SpreadsheetApp.getUi().alert("Provider In " + i + " Logged.");
+  });
 }
 
 /**
- * Provider Logout. Finds active session by ID where Departure is empty.
- * Targeted Clear: Search Name (1), Departure Date (3).
- */
+ * Provider Logout. Finds active session by ID where Departure is empty.
+ * Targeted Clear: Search Name (1), Departure Date (3).
+ */
 function coreProvOut(i) {
-  safeExecute(() => {
-    const ss = SpreadsheetApp.getActiveSpreadsheet();
-    const range = ss.getRangeByName("LOG_PROVIDER_OUT_ENTRY_" + i);
-    if (!range) return;
-    
-    const vals = range.getValues()[0];
-    const providerId = vals[1]; 
-    const masterSs = SpreadsheetApp.openById(MASTER_ID);
-    const masterSheet = masterSs.getSheetByName("Log_Provider");
-    
-    const idData = masterSheet.getRange("B:B").getValues().flat();
-    const depData = masterSheet.getRange("I:I").getValues().flat(); // Departure Date Col
-    
-    let targetRow = -1;
-    // Iterate from Row 4 to skip triple header
-    for (let j = 3; j < idData.length; j++) { 
-      if (idData[j].toString() === providerId.toString() && depData[j] === "") {
-        targetRow = j + 1;
-        break;
-      }
-    }
-    
-    if (targetRow !== -1) {
-      masterSheet.getRange(targetRow, 9, 1, 2).setValues([[vals[2], new Date()]]);
-      [1, 3].forEach(colIdx => range.getCell(1, colIdx).clearContent());
-      SpreadsheetApp.getUi().alert("Provider Out " + i + " Logged.");
-    } else {
-      SpreadsheetApp.getUi().alert("Error: No active session found for Provider ID " + providerId);
-    }
-  });
+  safeExecute(() => {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const range = ss.getRangeByName("LOG_PROVIDER_OUT_ENTRY_" + i);
+    if (!range) return;
+    
+    const vals = range.getValues()[0];
+    const providerId = vals[1]; 
+    const masterSs = SpreadsheetApp.openById(MASTER_ID);
+    const masterSheet = masterSs.getSheetByName("Log_Provider");
+    
+    const idData = masterSheet.getRange("B:B").getValues().flat();
+    const depData = masterSheet.getRange("I:I").getValues().flat(); // Departure Date Col
+    
+    let targetRow = -1;
+    // Iterate from Row 4 to skip triple header
+    for (let j = 3; j < idData.length; j++) { 
+      if (idData[j].toString() === providerId.toString() && depData[j] === "") {
+        targetRow = j + 1;
+        break;
+      }
+    }
+    
+    if (targetRow !== -1) {
+      masterSheet.getRange(targetRow, 9, 1, 2).setValues([[vals[2], new Date()]]);
+      [1, 3].forEach(colIdx => range.getCell(1, colIdx).clearContent());
+      SpreadsheetApp.getUi().alert("Provider Out " + i + " Logged.");
+    } else {
+      SpreadsheetApp.getUi().alert("Error: No active session found for Provider ID " + providerId);
+    }
+  });
 }
 
 // --- GENERATOR UTILITIES ---
 // Use these in the Script Editor to generate the 50 button functions for each category.
 
 function generatePatientButtons() {
-  let out = "";
-  for (let i = 1; i <= 50; i++) {
-    out += `function submitPatientRegistry${i}(){ corePatient(${i}); }\n`;
-  }
-  console.log(out);
+  let out = "";
+  for (let i = 1; i <= 50; i++) {
+    out += `function submitPatientRegistry${i}(){ corePatient(${i}); }\n`;
+  }
+  console.log(out);
 }
 
 function generateVisitInButtons() {
-  let out = "";
-  for (let i = 1; i <= 50; i++) {
-    out += `function submitVisitIn${i}(){ coreVisitIn(${i}); }\n`;
-  }
-  console.log(out);
+  let out = "";
+  for (let i = 1; i <= 50; i++) {
+    out += `function submitVisitIn${i}(){ coreVisitIn(${i}); }\n`;
+  }
+  console.log(out);
 }
 
 function generateVisitOutButtons() {
-  let out = "";
-  for (let i = 1; i <= 50; i++) {
-    out += `function submitVisitOut${i}(){ coreVisitOut(${i}); }\n`;
-  }
-  console.log(out);
+  let out = "";
+  for (let i = 1; i <= 50; i++) {
+    out += `function submitVisitOut${i}(){ coreVisitOut(${i}); }\n`;
+  }
+  console.log(out);
 }
 
 function generateProviderInButtons() {
-  let out = "";
-  for (let i = 1; i <= 50; i++) {
-    out += `function submitProviderIn${i}(){ coreProvIn(${i}); }\n`;
-  }
-  console.log(out);
+  let out = "";
+  for (let i = 1; i <= 50; i++) {
+    out += `function submitProviderIn${i}(){ coreProvIn(${i}); }\n`;
+  }
+  console.log(out);
 }
 
 function generateProviderOutButtons() {
-  let out = "";
-  for (let i = 1; i <= 50; i++) {
-    out += `function submitProviderOut${i}(){ coreProvOut(${i}); }\n`;
-  }
-  console.log(out);
+  let out = "";
+  for (let i = 1; i <= 50; i++) {
+    out += `function submitProviderOut${i}(){ coreProvOut(${i}); }\n`;
+  }
+  console.log(out);
 }
